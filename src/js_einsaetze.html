@@ -1,0 +1,851 @@
+<script>
+/**
+ * Einsätze & Stunden: Berichte aus dem Einsatztagebuch übernehmen, ergänzen, auswerten.
+ *
+ * Das Einsatztagebuch ist eine eigene Anwendung – eine HTML-Datei, die an der
+ * Einsatzstelle offline läuft und ihren Stand als JSON speichert. Diese Datei wird hier
+ * gelesen (`tagebuchLesen`), die Namen werden den Mitgliedern zugeordnet
+ * (`tagebuchZuordnen`), und aus „eingesetzt“ / „abgerückt“ werden Zeiträume. Gespeichert
+ * wird wie überall im Hintergrund (`einsaetze.speichern`).
+ *
+ * Was daraus folgt – Stunden je Mitglied, Nachweise aus Einsätzen unter Atemschutz –
+ * rechnet `05_Gemeinsam.js`, auf dem Server wie hier. Ältere Jahre stehen nicht im
+ * Datenstand; sie werden auf Wunsch geholt und sind nur zum Lesen da.
+ */
+'use strict';
+
+const EINSATZ_ART_TEXT = { einsatz: 'Einsatz', uebung: 'Übung', wache: 'Brandsicherheitswache', sonstiges: 'Sonstiger Dienst' };
+const EINSATZ_ART_FARBE = { einsatz: 'badge-rot', uebung: 'badge-blau', wache: 'badge-gelb', sonstiges: 'badge-grau' };
+/** Was im Kommentar des Tagebuchs auf Atemschutz deutet – nur ein Vorschlag, der Haken bleibt beim Anwender. */
+const ATEMSCHUTZ_WORTE = /atemschutz|\bagt\b|\bpa\b|unter pa/i;
+
+function einsatzArtBadge(art) {
+  return h('span.badge.' + (EINSATZ_ART_FARBE[art] || 'badge-grau'), EINSATZ_ART_TEXT[art] || art);
+}
+
+/** Für `<input type="datetime-local">`: Ortszeit, auf die Minute. */
+function zeitLokal(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
+  const p = (n) => String(n).padStart(2, '0');
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + 'T' + p(d.getHours()) + ':' + p(d.getMinutes());
+}
+
+function zeitAusLokal(text) {
+  if (!text) return '';
+  const d = new Date(text);
+  return isNaN(d.getTime()) ? '' : d.toISOString();
+}
+
+function uhrVon(iso) {
+  return iso ? new Date(iso).toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' }) : '–';
+}
+
+/** „16:47–18:55“, über Mitternacht mit dem Datum dazu. */
+function zeitspanne(von, bis) {
+  if (!bis) return uhrVon(von) + '–…';
+  return uhrVon(von) + '–' + (tagVon_(bis) !== tagVon_(von) ? datum(tagVon_(bis)) + ' ' : '') + uhrVon(bis);
+}
+
+function kraftName(k) {
+  const m = k.mitglied_id && Z.idx.mitglied.get(k.mitglied_id);
+  return m ? m.name : k.name;
+}
+
+// ─────────────────────────────── Jahre und Archiv ───────────────────────────────
+
+/** Jedes Jahr mit Berichten, dazu das laufende – neueste zuerst. */
+function einsatzJahre() {
+  const jahre = {};
+  jahre[heute().slice(0, 4)] = true;
+  (Z.daten.einsaetze || []).forEach((e) => {
+    jahre[tagVon_(e.beginn).slice(0, 4)] = true;
+  });
+  (Z.daten.einsatzArchiv || []).forEach((j) => {
+    jahre[j] = true;
+  });
+  return Object.keys(jahre).filter(Boolean).sort().reverse();
+}
+
+/**
+ * Die Berichte eines Jahres: aus dem Datenstand, oder – für Älteres – einmal geholt und
+ * dann gemerkt. Ältere Jahre sind nur zum Lesen da: Sie stehen nicht im Stand, also kann
+ * der Browser eine Änderung daran nicht vorhersagen.
+ */
+function einsatzQuelle(jahr) {
+  const d = Z.daten;
+  if (jahr >= String(d.einsatzZeitraum || '').slice(0, 4)) {
+    return { einsaetze: d.einsaetze.filter((e) => tagVon_(e.beginn).slice(0, 4) === jahr), kraefte: d.einsatzkraefte, archiv: false };
+  }
+  Z.einsatzArchiv = Z.einsatzArchiv || {};
+  const a = Z.einsatzArchiv[jahr];
+  if (!a) {
+    Z.einsatzArchiv[jahr] = { laedt: true, einsaetze: [], kraefte: [] };
+    api('einsaetze.jahr', { jahr: jahr }, { still: true })
+      .then((r) => {
+        Z.einsatzArchiv[jahr] = r;
+      })
+      .catch((e) => {
+        Z.einsatzArchiv[jahr] = { fehler: e.message, einsaetze: [], kraefte: [] };
+      })
+      .then(() => {
+        if (Router.teile()[0] === 'einsaetze') zeichnen();
+        if (offenerEinsatz && !offenerEinsatz.zu) offenerEinsatz.neu();
+      });
+    return { einsaetze: [], kraefte: [], archiv: true, laedt: true };
+  }
+  return { einsaetze: a.einsaetze, kraefte: a.kraefte, archiv: true, laedt: !!a.laedt, fehler: a.fehler || '' };
+}
+
+function einsatzFinden(id) {
+  const e = (Z.daten.einsaetze || []).find((x) => x.id === id);
+  if (e) return { e: e, kraefte: Z.daten.einsatzkraefte, archiv: false };
+  const archiv = Z.einsatzArchiv || {};
+  for (const jahr of Object.keys(archiv)) {
+    const a = (archiv[jahr].einsaetze || []).find((x) => x.id === id);
+    if (a) return { e: a, kraefte: archiv[jahr].kraefte, archiv: true };
+  }
+  return null;
+}
+
+// ─────────────────────────────── Seite ───────────────────────────────
+
+function seiteEinsaetze(param) {
+  const z = ui('einsaetze', { reiter: 'liste', jahr: heute().slice(0, 4), art: '', suche: '', sortiert: 'beginn', absteigend: true });
+  const zs = ui('einsaetze-stunden', { sortiert: 'name' });
+
+  // Der Bericht folgt der Adresse – wie Geräte- und Personalakte.
+  if (param && (Z.daten.einsaetze || []).some((e) => e.id === param)) {
+    if (!offenerEinsatz || offenerEinsatz.zu || offenerEinsatz.einsatzId !== param) {
+      setTimeout(() => {
+        const d = einsatzDialog(param, () => {
+          if (Router.teile()[0] === 'einsaetze' && Router.teile()[1] === param) gehe('/einsaetze', true);
+        });
+        d.ausAdresse = true;
+      }, 0);
+    }
+  } else if (offenerEinsatz && !offenerEinsatz.zu && offenerEinsatz.ausAdresse) {
+    offenerEinsatz.schliessen();
+  }
+
+  const jahre = einsatzJahre();
+  if (jahre.indexOf(z.jahr) < 0) z.jahr = jahre[0];
+  const q = einsatzQuelle(z.jahr);
+  const t = norm(z.suche);
+  const liste = q.einsaetze.filter((e) => (!z.art || e.art === z.art) &&
+    (!t || norm([e.bezeichnung, e.nummer, e.stichwort, e.ort, e.einsatzleiter].join(' ')).indexOf(t) >= 0));
+  const summen = {};
+  const nachEinsatz = {};
+  q.kraefte.forEach((k) => {
+    (nachEinsatz[k.einsatz_id] = nachEinsatz[k.einsatz_id] || []).push(k);
+  });
+  q.einsaetze.forEach((e) => {
+    summen[e.id] = einsatzSumme_(nachEinsatz[e.id] || []);
+  });
+  const anzahl = (art) => q.einsaetze.filter((e) => e.art === art).length;
+  const personenstunden = q.einsaetze.reduce((s, e) => s + summen[e.id].minuten, 0);
+  const atemschutz = q.einsaetze.reduce((s, e) => s + summen[e.id].atemschutz, 0);
+  const oeffnen = (e) => (q.archiv ? einsatzDialog(e.id) : gehe('/einsaetze/' + e.id, true));
+  const kachel = (wert, titel, art, klick) => h(klick ? 'button.kachel' : 'div.kachel', { class: art || '', onclick: klick || null },
+    h('div.kachel-wert', String(wert)), h('div.kachel-titel', titel));
+  const nachArt = (art) => () => {
+    z.art = z.art === art ? '' : art;
+    z.reiter = 'liste';
+    zeichnen();
+  };
+
+  let inhalt;
+  if (q.laedt) inhalt = h('div.laden', 'Lädt ' + z.jahr + ' …');
+  else if (q.fehler) inhalt = h('p.fehlertext', { style: { padding: '12px 20px' } }, q.fehler);
+  else if (z.reiter === 'liste') {
+    inhalt = [
+      h('div.filterleiste',
+        h('input.suche', { id: 'ein-suche', placeholder: 'Suchen: Bezeichnung, Nummer, Stichwort, Ort …', value: z.suche, oninput: (e) => { z.suche = e.target.value; zeichnen(); } }),
+        h('select', { id: 'ein-art', onchange: (e) => { z.art = e.target.value; zeichnen(); } },
+          [['', 'Jede Art']].concat(EINSATZ_ARTEN.map((a) => [a, EINSATZ_ART_TEXT[a]])).map((o) => h('option', { value: o[0], selected: z.art === o[0] }, o[1])))),
+      tabelle({
+        zustand: z,
+        schluessel: (e) => e.id,
+        zeilen: liste,
+        klick: oeffnen,
+        leer: q.einsaetze.length ? 'Nichts passt zu diesem Filter.' : 'In ' + z.jahr + ' noch keine Berichte. Oben „Einsatztagebuch übernehmen“ – oder „Bericht erfassen“ für Übungen und Wachen.',
+        spalten: [
+          { id: 'beginn', titel: 'Datum', wert: (e) => e.beginn, zelle: (e) => [h('strong', { style: { whiteSpace: 'nowrap' } }, datum(tagVon_(e.beginn))), h('div.klein.gedimmt', zeitspanne(e.beginn, e.ende))] },
+          { id: 'art', titel: 'Art', wert: (e) => e.art, zelle: (e) => [einsatzArtBadge(e.art), e.quelle === 'einsatztagebuch' ? h('div.klein.gedimmt', 'aus dem Tagebuch') : null] },
+          { id: 'bezeichnung', titel: 'Bericht', wert: (e) => e.bezeichnung, zelle: (e) => [h('strong', e.bezeichnung),
+            h('div.klein.gedimmt', [e.nummer, e.stichwort, e.ort].filter(Boolean).join(' · '))] },
+          { id: 'kraefte', titel: 'Kräfte', wert: (e) => summen[e.id].personen, zelle: (e) => [h('span', plural(summen[e.id].personen, 'Person', 'Personen')),
+            summen[e.id].atemschutz ? h('div.klein.gedimmt', summen[e.id].atemschutz + ' unter Atemschutz') : null] },
+          { id: 'stunden', titel: 'Personenstunden', klasse: 'rechts', wert: (e) => summen[e.id].minuten, zelle: (e) => stundenText_(summen[e.id].minuten) },
+        ],
+      }),
+    ];
+  } else {
+    const stunden = {};
+    einsatzStunden_(q.einsaetze, q.kraefte, z.jahr).forEach((x) => {
+      stunden[x.mitglied_id] = x;
+    });
+    const zeilen = Z.daten.mitglieder.filter((m) => m.aktiv || stunden[m.id]);
+    const zelle = (m, arten) => {
+      const x = stunden[m.id];
+      const n = x ? arten.reduce((s, a) => s + x.arten[a].anzahl, 0) : 0;
+      const min = x ? arten.reduce((s, a) => s + x.arten[a].minuten, 0) : 0;
+      return n ? [h('strong', String(n)), h('span.klein.gedimmt', ' · ' + stundenText_(min))] : h('span.gedimmt', '–');
+    };
+    inhalt = tabelle({
+      zustand: zs,
+      schluessel: (m) => m.id,
+      zeilen: zeilen,
+      klick: (m) => gehe('/personal/' + m.id),
+      leer: 'Keine Mitglieder.',
+      spalten: [
+        { id: 'name', titel: 'Name', wert: (m) => m.name, zelle: (m) => [h('strong', { style: { whiteSpace: 'nowrap' } }, m.name), m.aktiv ? null : h('div.klein.gedimmt', 'gesperrt')] },
+        { id: 'einsatz', titel: 'Einsätze', wert: (m) => (stunden[m.id] ? stunden[m.id].arten.einsatz.minuten : 0), zelle: (m) => zelle(m, ['einsatz']) },
+        { id: 'uebung', titel: 'Übungen', wert: (m) => (stunden[m.id] ? stunden[m.id].arten.uebung.minuten : 0), zelle: (m) => zelle(m, ['uebung']) },
+        { id: 'sonst', titel: 'Wachen & Dienste', wert: (m) => (stunden[m.id] ? stunden[m.id].arten.wache.minuten + stunden[m.id].arten.sonstiges.minuten : 0), zelle: (m) => zelle(m, ['wache', 'sonstiges']) },
+        { id: 'gesamt', titel: 'Stunden', klasse: 'rechts', wert: (m) => (stunden[m.id] ? stunden[m.id].minuten : 0), zelle: (m) => h('strong', stunden[m.id] ? stundenText_(stunden[m.id].minuten) : '–') },
+        { id: 'atem', titel: 'Atemschutz', klasse: 'rechts', wert: (m) => (stunden[m.id] ? stunden[m.id].atemschutz : 0), zelle: (m) => (stunden[m.id] && stunden[m.id].atemschutz ? String(stunden[m.id].atemschutz) + '×' : h('span.gedimmt', '–')) },
+      ],
+    });
+  }
+
+  return [
+    werkzeugleiste('Einsätze & Stunden', 'Berichte aus dem Einsatztagebuch, Übungen und Wachen – und was daraus folgt: Stunden je Mitglied, Nachweise unter Atemschutz.', [
+      h('select', { id: 'ein-jahr', style: { width: 'auto' }, onchange: (e) => { z.jahr = e.target.value; zeichnen(); } },
+        jahre.map((j) => h('option', { value: j, selected: z.jahr === j }, j))),
+      knopf('Bericht erfassen', 'plus', () => einsatzFormular(null)),
+      h('label.btn.btn-primary', { title: 'Die JSON-Datei aus „Speichern (JSON)“ im Einsatztagebuch' }, icon('importexport', 16), 'Einsatztagebuch übernehmen',
+        h('input', {
+          type: 'file',
+          id: 'tagebuch-datei',
+          accept: '.json,application/json',
+          style: { display: 'none' },
+          onchange: (e) => {
+            const datei = e.target.files[0];
+            e.target.value = '';
+            if (datei) datei.text().then((text) => tagebuchImport(text, datei.name));
+          },
+        })),
+    ]),
+    q.archiv && !q.laedt ? h('div.infobox', h('span', z.jahr + ' liegt vor dem, was die App ständig bereithält – hier nur zum Lesen. Ändern lassen sich die Berichte der letzten zwei Jahre.')) : null,
+    h('div.kacheln',
+      kachel(anzahl('einsatz'), 'Einsätze ' + z.jahr, z.art === 'einsatz' ? 'hinweis' : '', nachArt('einsatz')),
+      kachel(anzahl('uebung'), 'Übungen', z.art === 'uebung' ? 'hinweis' : '', nachArt('uebung')),
+      kachel(anzahl('wache') + anzahl('sonstiges'), 'Wachen & sonstige Dienste'),
+      kachel(stundenText_(personenstunden).replace(' h', ''), 'Personenstunden', '', () => { z.reiter = 'stunden'; zeichnen(); }),
+      kachel(atemschutz, 'Mal unter Atemschutz')),
+    h('div.karte',
+      h('div.reiter', { style: { margin: 0, padding: '0 14px' } }, [['liste', 'Berichte', liste.length], ['stunden', 'Stunden je Mitglied', '']].map((r) =>
+        h('button' + (z.reiter === r[0] ? '.aktiv' : ''), { type: 'button', onclick: () => { z.reiter = r[0]; zeichnen(); } }, r[1], r[2] !== '' ? h('span.zahl', r[2]) : null)),
+        h('span', { style: { flex: 1 } }),
+        z.reiter === 'stunden' ? h('button.btn.btn-klein', { style: { alignSelf: 'center' }, onclick: (e) => { e.currentTarget.disabled = true; pdfHolen('einsaetze.stundenPdf', { jahr: z.jahr }).catch(meldung.fehler.bind(meldung)).then(() => zeichnen()); } }, icon('drucken', 14), 'Stunden ' + z.jahr + ' (PDF)') : null),
+      inhalt),
+    h('div.infobox', { style: { marginTop: '18px' } },
+      h('span', 'Damit die Namen im Einsatztagebuch zu den Mitgliedern passen: Diese Listen dort mit „CSV ↑“ laden – dann ordnet die Übernahme jeden von selbst zu.'),
+      h('button.btn.btn-klein', { onclick: () => tagebuchListe('mitglieder') }, icon('download', 14), 'Mitglieder.csv'),
+      h('button.btn.btn-klein', { onclick: () => tagebuchListe('gegenstaende') }, icon('download', 14), 'Fahrzeuge.csv')),
+  ];
+}
+
+/**
+ * Eine Liste im Format des Einsatztagebuchs: eine Angabe je Zeile. Dort „CSV ↑“ bei
+ * Mitgliedern bzw. Gegenständen. Die Fahrzeuge sind die Lagerplätze der Art „Fahrzeug“.
+ */
+function tagebuchListe(art) {
+  const namen = art === 'mitglieder'
+    ? sortiertNachName(Z.daten.mitglieder.filter((m) => m.aktiv)).map((m) => m.name)
+    : Z.daten.lagerplaetze.filter((l) => l.typ === 'fahrzeug').map((l) => l.name).sort(vergleich);
+  const zeile = (n) => (/[",\n\r]/.test(n) ? '"' + n.replace(/"/g, '""') + '"' : n);
+  herunterladen(art === 'mitglieder' ? 'Mitglieder.csv' : 'Gegenstaende.csv', 'text/csv', namen.map(zeile).join('\r\n') + (namen.length ? '\r\n' : ''));
+}
+
+// ─────────────────────────────── Bericht ───────────────────────────────
+
+let offenerEinsatz = null;
+
+function einsatzDialog(id, beimSchliessen) {
+  if (offenerEinsatz && !offenerEinsatz.zu) {
+    if (offenerEinsatz.einsatzId === id) return offenerEinsatz;
+    offenerEinsatz.schliessen();
+  }
+  const z = { reiter: 'kraefte', tagebuch: null, laedt: false, fehler: '', kraefteEintraege: false };
+  const ctrl = dialog({
+    titel: 'Bericht',
+    breite: 'breit',
+    lebendig: true,
+    beimSchliessen: beimSchliessen,
+    inhalt: (c) => einsatzInhalt(id, z, c),
+  });
+  ctrl.einsatzId = id;
+  offenerEinsatz = ctrl;
+  return ctrl;
+}
+
+/** Die Abschrift kommt erst, wenn jemand hineinsieht – und erst, wenn der Bericht gespeichert ist. */
+function tagebuchHolen(id, z, c) {
+  if (z.laedt || z.tagebuch) return;
+  z.laedt = true;
+  api('einsaetze.tagebuch', { id: id }, { still: true })
+    .then((r) => {
+      z.tagebuch = r;
+      z.fehler = '';
+    })
+    .catch((e) => {
+      z.fehler = e.message;
+    })
+    .then(() => {
+      z.laedt = false;
+      c.neu();
+    });
+}
+
+function einsatzInhalt(id, z, c) {
+  const f = einsatzFinden(id);
+  if (!f) return h('div.leer', 'Diesen Bericht gibt es nicht (mehr).');
+  const e = f.e;
+  const darf = !f.archiv;
+  c.titel(e.bezeichnung);
+  const tag = tagVon_(e.beginn);
+  const kraefte = f.kraefte.filter((k) => k.einsatz_id === id)
+    .sort((a, b) => vergleich(a.von, b.von) || vergleich(kraftName(a), kraftName(b)));
+  const personen = kraefte.filter((k) => k.art !== 'mittel');
+  const mittel = kraefte.filter((k) => k.art === 'mittel');
+  const summe = einsatzSumme_(kraefte);
+  if (z.reiter === 'tagebuch') tagebuchHolen(id, z, c);
+
+  const kraefteTabelle = (zeilen, mitAtemschutz) => tabelle({
+    zustand: ui('einsatz-kraefte'),
+    neu: () => c.neu(),
+    schluessel: (k) => k.id,
+    zeilen: zeilen,
+    leer: mitAtemschutz ? 'Noch niemand eingetragen.' : 'Keine Fahrzeuge oder Geräte eingetragen.',
+    spalten: [
+      { id: 'name', titel: mitAtemschutz ? 'Einsatzkraft' : 'Fahrzeug / Gerät', zelle: (k) => [h('strong', kraftName(k)),
+        k.funktion ? h('div.klein.gedimmt', k.funktion) : null,
+        mitAtemschutz && !k.mitglied_id ? h('div.klein.gedimmt', 'Gastkraft – kein Mitglied') : null] },
+      { id: 'zeit', titel: 'Zeit', zelle: (k) => h('span', { style: { whiteSpace: 'nowrap' } }, (tagVon_(k.von) !== tag ? datum(tagVon_(k.von)) + ' ' : '') + zeitspanne(k.von, k.bis)) },
+      { id: 'dauer', titel: 'Dauer', klasse: 'rechts', zelle: (k) => dauerText_(minuten_(k.von, k.bis)) },
+      mitAtemschutz ? { id: 'atem', titel: 'Atemschutz', zelle: (k) => (k.atemschutz ? h('span.badge.badge-blau', 'unter Atemschutz') : h('span.gedimmt', '–')) } : null,
+    ].filter(Boolean),
+    aktion: darf ? (k) => [
+      h('button.btn.btn-klein', { onclick: () => kraftFormular(k, e) }, 'Bearbeiten'),
+      h('button.btn.btn-klein.btn-gefahr', {
+        title: 'Aus dem Bericht nehmen',
+        onclick: async () => {
+          if (!(await bestaetigen({ titel: kraftName(k) + ' aus dem Bericht nehmen?', text: 'Die Stunden zählen dann nicht mehr – und ein Nachweis unter Atemschutz aus diesem Einsatz auch nicht.', ja: 'Herausnehmen', gefahr: true }))) return;
+          sofort('einsatzkraefte.loeschen', { id: k.id }, kraftName(k) + ' herausgenommen.');
+        },
+      }, icon('muell', 14)),
+    ] : null,
+  });
+
+  let inhalt;
+  if (z.reiter === 'kraefte') {
+    inhalt = [kraefteTabelle(personen, true),
+      darf ? h('div', { style: { marginTop: '12px' } }, h('button.btn.btn-klein', { onclick: () => kraftFormular(null, e) }, icon('plus', 14), 'Einsatzkraft eintragen')) : null];
+  } else if (z.reiter === 'mittel') {
+    inhalt = [kraefteTabelle(mittel, false),
+      darf ? h('div', { style: { marginTop: '12px' } }, h('button.btn.btn-klein', { onclick: () => kraftFormular(null, e, 'mittel') }, icon('plus', 14), 'Fahrzeug oder Gerät eintragen')) : null];
+  } else if (z.fehler) {
+    inhalt = h('p.fehlertext', z.fehler);
+  } else if (!z.tagebuch) {
+    inhalt = h('div.laden', 'Lädt das Tagebuch …');
+  } else {
+    const zeilen = z.tagebuch.filter((t) => t.liste === 'tagebuch' || z.kraefteEintraege)
+      .map((t, i) => [t, i]).sort((a, b) => vergleich(a[0].zeit, b[0].zeit) || a[1] - b[1]).map((x) => x[0]);
+    const kraefteZahl = z.tagebuch.filter((t) => t.liste === 'kraefte').length;
+    inhalt = [
+      z.tagebuch.length ? null : h('div.leer', e.quelle === 'einsatztagebuch' ? 'Das Tagebuch war leer.' : 'Von Hand erfasst – ohne Einsatztagebuch.'),
+      zeilen.length ? h('div.tagebuch', zeilen.map((t) => h('div.tagebuch-zeile' + (t.geloescht ? '.gestrichen' : '') + (t.liste === 'kraefte' ? '.kraefte' : ''),
+        h('span.tagebuch-zeit.mono', (tagVon_(t.zeit) !== tag ? datum(tagVon_(t.zeit)).slice(0, 6) + ' ' : '') + new Date(t.zeit).toLocaleTimeString('de-DE'),
+          t.zeit_vorher.map((alt) => h('s.klein.gedimmt', { style: { display: 'block' } }, new Date(alt).toLocaleTimeString('de-DE')))),
+        h('span.tagebuch-text',
+          h('span.tagebuch-inhalt', t.liste === 'kraefte' ? t.text + (t.aktion ? ' – ' + t.aktion : '') : t.text),
+          t.geloescht ? h('span.badge.badge-grau', { style: { marginLeft: '8px' } }, 'gestrichen') : null,
+          t.kommentar ? h('div.klein.gedimmt', t.kommentar) : null,
+          t.vorher.slice().reverse().map((x) => h('div.klein.gedimmt', 'vorher: ' + x)))))) : null,
+      kraefteZahl ? h('label.haken', { style: { marginTop: '12px' } },
+        h('input', { type: 'checkbox', checked: z.kraefteEintraege, onchange: (ev) => { z.kraefteEintraege = ev.target.checked; c.neu(); } }),
+        h('span.klein', 'Auch die ' + kraefteZahl + ' Einträge der Kräfte zeigen (eingesetzt / abgerückt)')) : null,
+    ];
+  }
+
+  return [
+    h('div.knopfreihe', { style: { marginBottom: '16px' } },
+      einsatzArtBadge(e.art),
+      e.quelle === 'einsatztagebuch' ? h('span.badge.badge-grau', 'aus dem Einsatztagebuch') : null,
+      f.archiv ? h('span.badge.badge-grau', 'älteres Jahr – nur lesen') : null,
+      e.nummer ? h('span.mono.gedimmt', e.nummer) : null),
+    h('div.detail-raster',
+      h('div.detail-feld', h('span', 'Beginn'), h('strong', datumZeit(e.beginn))),
+      h('div.detail-feld', h('span', 'Ende'), h('strong', e.ende ? datumZeit(e.ende) : '–'), e.ende ? h('div.klein.gedimmt', dauerText_(minuten_(e.beginn, e.ende))) : null),
+      h('div.detail-feld', h('span', 'Stichwort'), h('strong', e.stichwort || '–')),
+      h('div.detail-feld', h('span', 'Ort'), h('strong', e.ort || '–')),
+      h('div.detail-feld', h('span', 'Einsatzleitung'), h('strong', e.einsatzleiter || '–')),
+      h('div.detail-feld', h('span', 'Kräfte'), h('strong', plural(summe.personen, 'Person', 'Personen')),
+        h('div.klein.gedimmt', [summe.atemschutz ? summe.atemschutz + ' unter Atemschutz' : '', summe.mittel ? plural(summe.mittel, 'Fahrzeug/Gerät', 'Fahrzeuge/Geräte') : ''].filter(Boolean).join(' · '))),
+      h('div.detail-feld', h('span', 'Personenstunden'), h('strong', stundenText_(summe.minuten))),
+      h('div.detail-feld', { style: { gridColumn: '1 / -1' } }, h('span', 'Bericht'),
+        e.bericht ? h('div', { style: { whiteSpace: 'pre-line', fontWeight: 400 } }, e.bericht)
+          : h('div.gedimmt', { style: { fontWeight: 400 } }, darf ? 'Noch nicht geschrieben – „Bearbeiten“.' : 'Kein Bericht geschrieben.'))),
+    h('div.knopfreihe', { style: { marginBottom: '6px' } },
+      darf ? h('button.btn.btn-klein', { onclick: () => einsatzFormular(e) }, icon('stift', 14), e.bericht ? 'Bearbeiten' : 'Bericht schreiben') : null,
+      h('button.btn.btn-klein', { onclick: (ev) => { ev.currentTarget.disabled = true; pdfHolen('einsaetze.pdf', { id: id }).catch(meldung.fehler.bind(meldung)).then(() => c.neu()); } }, icon('drucken', 14), 'Bericht (PDF)'),
+      darf ? h('button.btn.btn-klein.btn-gefahr', {
+        onclick: async () => {
+          if (!(await bestaetigen({ titel: 'Bericht „' + e.bezeichnung + '“ löschen?', text: 'Mit allen Kräften und der Abschrift des Tagebuchs. Die Stunden zählen danach nicht mehr, Nachweise aus diesem Einsatz entfallen.', ja: 'Löschen', gefahr: true }))) return;
+          if (sofort('einsaetze.loeschen', { id: id }, 'Bericht gelöscht.')) c.schliessen();
+        },
+      }, icon('muell', 14), 'Löschen') : null),
+    h('div.reiter', [
+      ['kraefte', 'Einsatzkräfte', personen.length],
+      ['mittel', 'Fahrzeuge & Gerät', mittel.length],
+      ['tagebuch', 'Einsatztagebuch', e.tagebuch_eintraege || 0],
+    ].map((r) => h('button' + (z.reiter === r[0] ? '.aktiv' : ''), { type: 'button', onclick: () => { z.reiter = r[0]; c.neu(); } }, r[1], h('span.zahl', r[2])))),
+    inhalt,
+  ];
+}
+
+/**
+ * Kopfdaten und Bericht bearbeiten – oder einen Bericht von Hand anlegen, typisch für
+ * Übungen und Wachen: dann gleich mit den Teilnehmern, alle von Beginn bis Ende. Wer
+ * früher ging, bekommt seine Zeit danach im Bericht.
+ */
+function einsatzFormular(e) {
+  const neu = !e;
+  const jetzt = new Date();
+  jetzt.setMinutes(Math.floor(jetzt.getMinutes() / 15) * 15, 0, 0);
+  const start = neu
+    ? { art: 'uebung', bezeichnung: '', nummer: '', stichwort: '', ort: '', einsatzleiter: '', beginn: zeitLokal(jetzt.toISOString()), ende: '', bericht: '', dabei: {}, atemschutz: {} }
+    : Object.assign({}, e, { beginn: zeitLokal(e.beginn), ende: zeitLokal(e.ende), bericht: e.bericht || '' });
+  const aktive = sortiertNachName(Z.daten.mitglieder.filter((m) => m.aktiv));
+  formular({
+    titel: neu ? 'Bericht erfassen' : 'Bericht bearbeiten',
+    breite: 'breit',
+    werte: start,
+    inhalt: (w, c) => {
+      const gewaehlt = neu ? aktive.filter((m) => w.dabei[m.id]) : [];
+      return [
+        h('div.zeile',
+          feld('Art', auswahl(w, 'art', EINSATZ_ARTEN.map((a) => [a, EINSATZ_ART_TEXT[a]]))),
+          feld('Nummer', eingabe(w, 'nummer', { placeholder: 'z. B. E-2026-117' }))),
+        feld('Bezeichnung', eingabe(w, 'bezeichnung', { placeholder: 'z. B. Wohnungsbrand Lindenstraße 12' })),
+        h('div.zeile',
+          feld('Stichwort', eingabe(w, 'stichwort', { placeholder: 'z. B. B3, TH, BMA' })),
+          feld('Ort', eingabe(w, 'ort'))),
+        feld('Einsatzleitung', eingabe(w, 'einsatzleiter')),
+        h('div.zeile',
+          feld('Beginn', eingabe(w, 'beginn', { type: 'datetime-local' })),
+          feld('Ende', eingabe(w, 'ende', { type: 'datetime-local' }), neu ? 'Für die Stunden der Teilnehmer.' : null)),
+        feld('Bericht', textfeld(w, 'bericht', { rows: 6, placeholder: 'Lage bei Eintreffen …\nMaßnahmen …\nBesonderheiten …' })),
+        neu ? [
+          h('div.abschnitt-titel', 'Wer war dabei', h('span.klein', { style: { textTransform: 'none', letterSpacing: 0, fontWeight: 500 } }, gewaehlt.length ? '(' + gewaehlt.length + ')' : '')),
+          h('div.teilnehmer', aktive.map((m) => h('div.teilnehmer-zeile',
+            h('label.haken', { style: { margin: 0 } }, h('input', { type: 'checkbox', id: 'f-dabei-' + m.id, checked: !!w.dabei[m.id], onchange: (ev) => { w.dabei[m.id] = ev.target.checked; c.neu(); } }), h('span', m.name)),
+            w.dabei[m.id] ? h('label.haken.klein', { style: { margin: 0 } }, h('input', { type: 'checkbox', id: 'f-as-' + m.id, checked: !!w.atemschutz[m.id], onchange: (ev) => { w.atemschutz[m.id] = ev.target.checked; } }), h('span', 'unter Atemschutz')) : null))),
+        ] : null,
+      ];
+    },
+    sperre: (w) => (!String(w.bezeichnung || '').trim() ? 'Bezeichnung angeben' : !w.beginn ? 'Beginn angeben'
+      : neu && aktive.some((m) => w.dabei[m.id]) && !w.ende ? 'Ende angeben – für die Stunden' : null),
+    speichern: (w) => {
+      const zeit = (k) => (!neu && w[k] === start[k] ? e[k] : zeitAusLokal(w[k]));
+      const args = {
+        art: w.art, nummer: w.nummer, stichwort: w.stichwort, bezeichnung: w.bezeichnung, ort: w.ort, einsatzleiter: w.einsatzleiter,
+        beginn: zeit('beginn'), ende: zeit('ende') || '', bericht: w.bericht,
+      };
+      if (!neu) {
+        const r = Sync.tun('einsaetze.speichern', Object.assign({ id: e.id }, args));
+        meldung.erfolg('Gespeichert.');
+        return r;
+      }
+      args.neu_id = neueId();
+      args.kraefte = aktive.filter((m) => w.dabei[m.id]).map((m) => ({
+        neu_id: neueId(), art: 'person', mitglied_id: m.id, name: m.name, von: args.beginn, bis: args.ende, atemschutz: !!w.atemschutz[m.id], funktion: '',
+      }));
+      const r = Sync.tun('einsaetze.speichern', args);
+      meldung.erfolg(EINSATZ_ART_TEXT[w.art] + ' erfasst' + (args.kraefte.length ? ' – ' + plural(args.kraefte.length, 'Teilnehmer', 'Teilnehmer') : '') + '.');
+      if (Z.daten.einsaetze.some((x) => x.id === args.neu_id)) setTimeout(() => gehe('/einsaetze/' + args.neu_id, true), 0);
+      return r;
+    },
+  });
+}
+
+/** Eine Einsatzkraft: Mitglied, Gastkraft (nur Name) oder Fahrzeug/Gerät. */
+function kraftFormular(k, e, vorgabeArt) {
+  const neu = !k;
+  const typ = k ? (k.art === 'mittel' ? 'mittel' : k.mitglied_id ? 'mitglied' : 'gast') : vorgabeArt || 'mitglied';
+  const start = {
+    typ: typ,
+    mitglied_id: k && k.mitglied_id ? k.mitglied_id : '',
+    name: k ? k.name : '',
+    von: zeitLokal(k ? k.von : e.beginn),
+    bis: zeitLokal(k ? k.bis : e.ende),
+    atemschutz: k ? !!k.atemschutz : false,
+    funktion: k ? k.funktion || '' : '',
+  };
+  formular({
+    titel: neu ? (typ === 'mittel' ? 'Fahrzeug oder Gerät eintragen' : 'Einsatzkraft eintragen') : kraftName(k),
+    werte: start,
+    inhalt: (w, c) => [
+      feld('Was', auswahl(w, 'typ', [['mitglied', 'Mitglied'], ['gast', 'Gastkraft – kein Mitglied'], ['mittel', 'Fahrzeug oder Gerät']], null, () => c.neu())),
+      w.typ === 'mitglied'
+        ? feld('Mitglied', auswahl(w, 'mitglied_id', [['', '– Mitglied wählen –']].concat(sortiertNachName(Z.daten.mitglieder.filter((m) => m.aktiv || m.id === w.mitglied_id)).map((m) => [m.id, m.name])), null, () => c.fussNeu()))
+        : feld('Name', eingabe(w, 'name', { placeholder: w.typ === 'mittel' ? 'z. B. LF 10' : 'z. B. Heinz Nachbar (FF Nachbarort)' })),
+      h('div.zeile',
+        feld('Von', eingabe(w, 'von', { type: 'datetime-local' })),
+        feld('Bis', eingabe(w, 'bis', { type: 'datetime-local' }))),
+      w.typ === 'mittel' ? null : haken(w, 'atemschutz', 'Unter Atemschutz eingesetzt'),
+      feld('Funktion', eingabe(w, 'funktion', { placeholder: w.typ === 'mittel' ? 'optional' : 'z. B. Angriffstrupp, Maschinist' })),
+    ],
+    sperre: (w) => (w.typ === 'mitglied' && !w.mitglied_id ? 'Mitglied wählen' : w.typ !== 'mitglied' && !String(w.name || '').trim() ? 'Name angeben'
+      : !w.von || !w.bis ? 'Von und bis angeben' : null),
+    links: neu ? null : (w, c) => h('button.btn.btn-text', {
+      onclick: async () => {
+        if (!(await bestaetigen({ titel: kraftName(k) + ' aus dem Bericht nehmen?', text: 'Die Stunden zählen dann nicht mehr.', ja: 'Herausnehmen', gefahr: true }))) return;
+        if (sofort('einsatzkraefte.loeschen', { id: k.id }, 'Herausgenommen.')) c.schliessen();
+      },
+    }, 'Herausnehmen'),
+    speichern: (w) => {
+      // Unverändert gelassene Zeiten behalten ihre Sekunden aus dem Tagebuch.
+      const zeit = (f) => (!neu && w[f] === start[f] ? k[f] : zeitAusLokal(w[f]));
+      const r = Sync.tun('einsatzkraefte.speichern', {
+        id: neu ? undefined : k.id,
+        neu_id: neu ? neueId() : undefined,
+        einsatz_id: e.id,
+        art: w.typ === 'mittel' ? 'mittel' : 'person',
+        mitglied_id: w.typ === 'mitglied' ? w.mitglied_id : '',
+        name: w.typ === 'mitglied' ? '' : w.name,
+        von: zeit('von'),
+        bis: zeit('bis'),
+        atemschutz: w.typ !== 'mittel' && !!w.atemschutz,
+        funktion: w.funktion,
+      });
+      meldung.erfolg('Gespeichert.');
+      return r;
+    },
+  });
+}
+
+// ─────────────────────────────── Einsatztagebuch übernehmen ───────────────────────────────
+
+/** Datum und Alarmzeit aus den Kopfdaten – „14:32“, „14.32“ oder „1432“, wie das Tagebuch sie annimmt. */
+function tagebuchAlarm(datumText, zeit) {
+  const d = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(datumText || '').trim());
+  const z = String(zeit || '').trim();
+  const t = /^(\d{1,2})\D+(\d{1,2})(?:\D+(\d{1,2}))?$/.exec(z) || /^(\d{1,2})(\d{2})(\d{2})?$/.exec(z);
+  if (!d || !t || +t[1] > 23 || +t[2] > 59) return '';
+  return new Date(+d[1], +d[2] - 1, +d[3], +t[1], +t[2], t[3] ? +t[3] : 0).toISOString();
+}
+
+/**
+ * Den JSON-Export des Einsatztagebuchs lesen (`formatVersion` 1: `meta`, `tagebuch`,
+ * `kraefte`). Gestrichenes bleibt in der Abschrift, zählt aber für keine Zeit.
+ *
+ * Aus den Kräften werden Zeiträume: „eingesetzt“ öffnet, „abgerückt“ schließt. Wer nie
+ * abgerückt ist, bleibt bis zum Einsatzende (`bis: null`). Ein Eintrag ohne Aktion – so
+ * schrieben ihn ältere Fassungen – zählt als „eingesetzt“.
+ */
+function tagebuchLesen(text) {
+  if (String(text).length > 5000000) throw new Error('Die Datei ist zu groß für ein Einsatztagebuch (über 5 MB).');
+  let roh;
+  try {
+    roh = JSON.parse(String(text).replace(/^﻿/, ''));
+  } catch (e) {
+    throw new Error('Das ist keine JSON-Datei. Gebraucht wird „Speichern (JSON)“ aus dem Einsatztagebuch.');
+  }
+  if (!roh || typeof roh !== 'object' || !roh.meta || !Array.isArray(roh.tagebuch) || !Array.isArray(roh.kraefte)) {
+    throw new Error('Das ist kein Einsatztagebuch – es fehlen Kopfdaten, Tagebuch oder Kräfte.');
+  }
+  const gueltig = (z) => typeof z === 'string' && Number.isFinite(Date.parse(z));
+  const iso = (z) => new Date(z).toISOString();
+  const lesen = (liste, art) => liste.filter((e) => e && gueltig(e.zeit)).map((e) => ({
+    liste: art,
+    zeit: iso(e.zeit),
+    text: String((art === 'tagebuch' ? e.text : e.einheit) || '').trim(),
+    aktion: art === 'kraefte' && (e.aktion === 'eingesetzt' || e.aktion === 'abgerückt') ? e.aktion : '',
+    kommentar: String(e.kommentar || '').trim(),
+    geloescht: !!e.geloescht,
+    vorher: (Array.isArray(e.history) ? e.history : []).map((x) => String(typeof x === 'string' ? x : (x && x.text) || '').trim()).filter(Boolean),
+    zeit_vorher: (Array.isArray(e.zeitHistory) ? e.zeitHistory : []).filter((x) => x && gueltig(x.zeit)).map((x) => iso(x.zeit)),
+  }));
+  const chronologisch = (l) => l.map((e, i) => [e, i]).sort((a, b) => Date.parse(a[0].zeit) - Date.parse(b[0].zeit) || a[1] - b[1]).map((x) => x[0]);
+  const tagebuch = chronologisch(lesen(roh.tagebuch, 'tagebuch'));
+  const kraefte = chronologisch(lesen(roh.kraefte, 'kraefte'));
+  const meta = roh.meta || {};
+  const zeiten = tagebuch.concat(kraefte).filter((e) => !e.geloescht).map((e) => Date.parse(e.zeit));
+  const erster = zeiten.length ? new Date(Math.min.apply(null, zeiten)).toISOString() : gueltig(roh.erstelltAm) ? iso(roh.erstelltAm) : '';
+  const beginn = tagebuchAlarm(meta.datum, meta.alarmzeit) || erster;
+  let ende = zeiten.length ? new Date(Math.max.apply(null, zeiten)).toISOString() : beginn;
+  if (beginn && Date.parse(ende) < Date.parse(beginn)) ende = beginn;
+
+  const je = new Map();
+  kraefte.forEach((e) => {
+    if (e.geloescht || !e.text) return;
+    let k = je.get(e.text);
+    if (!k) {
+      k = { name: e.text, intervalle: [], offen: null, kommentare: [] };
+      je.set(e.text, k);
+    }
+    if (e.kommentar && k.kommentare.indexOf(e.kommentar) < 0) k.kommentare.push(e.kommentar);
+    if (e.aktion === 'abgerückt') {
+      if (k.offen) k.intervalle.push({ von: k.offen, bis: e.zeit });
+      k.offen = null;
+    } else if (!k.offen) {
+      k.offen = e.zeit;
+    }
+  });
+  const liste = [];
+  je.forEach((k) => {
+    if (k.offen) k.intervalle.push({ von: k.offen, bis: null });
+    if (k.intervalle.length) liste.push({ name: k.name, intervalle: k.intervalle, funktion: k.kommentare.join(', ') });
+  });
+  return {
+    kennung: gueltig(roh.erstelltAm) ? 'tagebuch:' + iso(roh.erstelltAm) : '',
+    meta: {
+      bezeichnung: String(meta.einsatzbezeichnung || '').trim(),
+      ort: String(meta.einsatzort || '').trim(),
+      stichwort: String(meta.einsatzstichwort || '').trim(),
+      nummer: String(meta.einsatznummer || '').trim(),
+      einsatzleiter: String(meta.einsatzleiter || '').trim(),
+    },
+    beginn: beginn,
+    ende: ende,
+    eintraege: tagebuch.concat(kraefte),
+    gestrichen: tagebuch.filter((e) => e.geloescht).length,
+    kraefte: liste,
+  };
+}
+
+function namensSchluessel(name) {
+  return norm(name).replace(/[^a-z0-9äöüß]+/g, ' ').trim();
+}
+
+/**
+ * Wer ist „Max Brenner“ im Tagebuch? Ein Mitglied gleichen Namens – auch als „Brenner, Max“.
+ * Sonst ein Fahrzeug, wenn es ein Lagerplatz der Art Fahrzeug ist oder eine Ziffer trägt
+ * („LF 10“, „Florian 44/1“), sonst eine Gastkraft. Nur ein Vorschlag: Der Anwender sieht
+ * jede Zuordnung und kann sie ändern.
+ */
+function tagebuchZuordnen(name) {
+  const k = namensSchluessel(name);
+  const teile = String(name).split(',');
+  const gedreht = teile.length === 2 ? namensSchluessel(teile[1] + ' ' + teile[0]) : null;
+  const treffer = Z.daten.mitglieder.filter((m) => {
+    const mk = namensSchluessel(m.name);
+    return mk === k || mk === gedreht;
+  });
+  if (treffer.length === 1) return 'm:' + treffer[0].id;
+  if (Z.daten.lagerplaetze.some((l) => l.typ === 'fahrzeug' && namensSchluessel(l.name) === k) || /\d/.test(name)) return 'mittel';
+  return 'gast';
+}
+
+/** Aus der Datei einen Bericht machen: Kopfdaten prüfen, Namen zuordnen, übernehmen. */
+function tagebuchImport(text, dateiname) {
+  let t;
+  try {
+    t = tagebuchLesen(text);
+  } catch (e) {
+    meldung.fehler(e);
+    return null;
+  }
+  const da = t.kennung ? (Z.daten.einsaetze || []).find((e) => e.quelle_kennung === t.kennung) : null;
+  const start = {
+    art: 'einsatz',
+    bezeichnung: t.meta.bezeichnung || t.meta.stichwort || (t.beginn ? 'Einsatz vom ' + datum(tagVon_(t.beginn)) : ''),
+    nummer: t.meta.nummer,
+    stichwort: t.meta.stichwort,
+    ort: t.meta.ort,
+    einsatzleiter: t.meta.einsatzleiter,
+    beginn: zeitLokal(t.beginn),
+    ende: zeitLokal(t.ende),
+    bericht: '',
+    ersetzen: false,
+    kraefte: t.kraefte.map((k) => ({
+      name: k.name,
+      intervalle: k.intervalle,
+      funktion: k.funktion,
+      ziel: tagebuchZuordnen(k.name),
+      atemschutz: ATEMSCHUTZ_WORTE.test(k.funktion),
+    })),
+  };
+  // Wer nie abgerückt ist, bleibt bis zum Ende – auch wenn das Ende hier noch verschoben wird.
+  const zeitraeume = (k, w) => k.intervalle.map((iv) => {
+    const ende = zeitAusLokal(w.ende) || iv.von;
+    const bis = iv.bis || (Date.parse(ende) > Date.parse(iv.von) ? ende : iv.von);
+    return { von: iv.von, bis: bis, offen: !iv.bis };
+  });
+  const mitglieder = sortiertNachName(Z.daten.mitglieder);
+
+  return formular({
+    titel: 'Einsatztagebuch übernehmen',
+    breite: 'breit',
+    werte: start,
+    speichernText: 'Übernehmen',
+    inhalt: (w, c) => {
+      const zaehler = { mitglied: 0, gast: 0, mittel: 0, weg: 0, minuten: 0 };
+      w.kraefte.forEach((k) => {
+        const art = k.ziel.indexOf('m:') === 0 ? 'mitglied' : k.ziel;
+        zaehler[art]++;
+        if (art !== 'mittel' && art !== 'weg') zaehler.minuten += zeitraeume(k, w).reduce((s, x) => s + minuten_(x.von, x.bis), 0);
+      });
+      const auswahlZiel = (k, i) => h('select', {
+        id: 'f-ziel-' + i,
+        onchange: (ev) => {
+          k.ziel = ev.target.value;
+          if (k.ziel === 'mittel' || k.ziel === 'weg') k.atemschutz = false;
+          c.neu();
+        },
+      },
+      h('optgroup', { label: 'Mitglied' }, mitglieder.map((m) => h('option', { value: 'm:' + m.id, selected: k.ziel === 'm:' + m.id }, m.name + (m.aktiv ? '' : ' (gesperrt)')))),
+      h('optgroup', { label: 'Sonst' },
+        h('option', { value: 'gast', selected: k.ziel === 'gast' }, 'Gastkraft – kein Mitglied'),
+        h('option', { value: 'mittel', selected: k.ziel === 'mittel' }, 'Fahrzeug oder Gerät'),
+        h('option', { value: 'weg', selected: k.ziel === 'weg' }, 'nicht übernehmen')));
+      return [
+        h('div.infobox', h('span', (dateiname ? dateiname + ': ' : '') + plural(t.eintraege.filter((e) => e.liste === 'tagebuch').length, 'Tagebucheintrag', 'Tagebucheinträge') +
+          (t.gestrichen ? ' (' + t.gestrichen + ' gestrichen)' : '') + ', ' + plural(t.kraefte.length, 'Kraft', 'Kräfte') +
+          '. Das Tagebuch wird als Abschrift übernommen – mit Gestrichenem und früheren Fassungen.')),
+        da ? h('div.hinweisbox', h('span', 'Dieses Einsatztagebuch ist schon übernommen: „' + da.bezeichnung + '“, am ' + datumZeit(da.erfasst_am) + '.'),
+          h('label.haken', { style: { margin: 0 } }, h('input', { type: 'checkbox', id: 'f-ersetzen', checked: w.ersetzen, onchange: (ev) => { w.ersetzen = ev.target.checked; c.fussNeu(); } }),
+            h('span', 'Den bisherigen Bericht ersetzen – was dort seitdem geändert wurde, geht verloren'))) : null,
+        h('div.zeile',
+          feld('Art', auswahl(w, 'art', EINSATZ_ARTEN.map((a) => [a, EINSATZ_ART_TEXT[a]]))),
+          feld('Nummer', eingabe(w, 'nummer'))),
+        feld('Bezeichnung', eingabe(w, 'bezeichnung')),
+        h('div.zeile',
+          feld('Stichwort', eingabe(w, 'stichwort')),
+          feld('Ort', eingabe(w, 'ort'))),
+        h('div.zeile',
+          feld('Einsatzleitung', eingabe(w, 'einsatzleiter')),
+          feld('Beginn', eingabe(w, 'beginn', { type: 'datetime-local' })),
+          feld('Ende', eingabe(w, 'ende', { type: 'datetime-local', onchange: () => c.neu() }))),
+        h('div.abschnitt-titel', 'Wer und was dabei war'),
+        h('p.klein.gedimmt', { style: { marginTop: '-4px' } }, 'Stunden und Nachweise zählen für Mitglieder. Unter Atemschutz bitte selbst ankreuzen – das Tagebuch sagt es nicht verlässlich.'),
+        w.kraefte.length ? tabelle({
+          zustand: {},
+          neu: () => c.neu(),
+          schluessel: (k) => k.name,
+          zeilen: w.kraefte,
+          seite: 500,
+          spalten: [
+            { id: 'name', titel: 'Im Tagebuch', zelle: (k) => [h('strong', k.name),
+              h('div.klein.gedimmt', zeitraeume(k, w).map((x) => zeitspanne(x.von, x.bis) + (x.offen ? ' (ohne Abrücken)' : '')).join(', '))] },
+            { id: 'ziel', titel: 'Ist', zelle: (k) => auswahlZiel(k, w.kraefte.indexOf(k)) },
+            { id: 'dauer', titel: 'Dauer', klasse: 'rechts', zelle: (k) => dauerText_(zeitraeume(k, w).reduce((s, x) => s + minuten_(x.von, x.bis), 0)) },
+            { id: 'atem', titel: 'Atemschutz', zelle: (k) => (k.ziel === 'mittel' || k.ziel === 'weg' ? h('span.gedimmt', '–')
+              : h('label.haken', { style: { margin: 0 } }, h('input', { type: 'checkbox', id: 'f-atem-' + w.kraefte.indexOf(k), checked: k.atemschutz, onchange: (ev) => { k.atemschutz = ev.target.checked; c.neu(); } }), h('span.klein', 'ja'))) },
+            { id: 'funktion', titel: 'Funktion', zelle: (k) => h('input', { id: 'f-fkt-' + w.kraefte.indexOf(k), value: k.funktion, placeholder: '–', oninput: (ev) => { k.funktion = ev.target.value; } }) },
+          ],
+        }) : h('div.leer', 'Im Tagebuch sind keine Kräfte eingetragen.'),
+        h('p.klein', { style: { marginTop: '10px' } }, h('strong', plural(zaehler.mitglied, 'Mitglied', 'Mitglieder')),
+          zaehler.gast ? ' · ' + plural(zaehler.gast, 'Gastkraft', 'Gastkräfte') : '', zaehler.mittel ? ' · ' + plural(zaehler.mittel, 'Fahrzeug/Gerät', 'Fahrzeuge/Geräte') : '',
+          zaehler.weg ? ' · ' + zaehler.weg + ' nicht übernommen' : '', ' · ', h('strong', stundenText_(zaehler.minuten)), ' Personenstunden'),
+        feld('Bericht', textfeld(w, 'bericht', { rows: 4, placeholder: 'Kann auch später geschrieben werden: Lage bei Eintreffen, Maßnahmen, Besonderheiten …' })),
+      ];
+    },
+    sperre: (w) => (!String(w.bezeichnung || '').trim() ? 'Bezeichnung angeben' : !w.beginn ? 'Beginn angeben' : da && !w.ersetzen ? 'Schon übernommen' : null),
+    speichern: (w) => {
+      const beginn = zeitAusLokal(w.beginn);
+      const ende = zeitAusLokal(w.ende);
+      const kraefte = [];
+      w.kraefte.forEach((k) => {
+        if (k.ziel === 'weg') return;
+        const mitglied = k.ziel.indexOf('m:') === 0 ? k.ziel.slice(2) : null;
+        zeitraeume(k, w).forEach((x) => kraefte.push({
+          neu_id: neueId(),
+          art: k.ziel === 'mittel' ? 'mittel' : 'person',
+          mitglied_id: mitglied,
+          name: k.name,
+          von: x.von,
+          bis: x.bis,
+          atemschutz: k.ziel !== 'mittel' && !!k.atemschutz,
+          funktion: k.funktion,
+        }));
+      });
+      const id = neueId();
+      const r = Sync.tun('einsaetze.speichern', {
+        neu_id: id,
+        art: w.art, nummer: w.nummer, stichwort: w.stichwort, bezeichnung: w.bezeichnung, ort: w.ort, einsatzleiter: w.einsatzleiter,
+        beginn: beginn, ende: ende, bericht: w.bericht,
+        quelle: 'einsatztagebuch',
+        quelle_kennung: t.kennung,
+        ersetzt: da && w.ersetzen ? da.id : undefined,
+        kraefte: kraefte,
+        tagebuch: t.eintraege,
+      });
+      const summe = einsatzSumme_(kraefte);
+      const sichtbar = Z.daten.einsaetze.some((x) => x.id === id);
+      meldung.erfolg('„' + w.bezeichnung + '“ übernommen: ' + plural(summe.personen, 'Person', 'Personen') + ', ' + stundenText_(summe.minuten) +
+        (sichtbar ? '.' : ' – unter ' + tagVon_(beginn).slice(0, 4) + ' zu finden.'));
+      if (sichtbar) setTimeout(() => gehe('/einsaetze/' + id, true), 0);
+      return r;
+    },
+  });
+}
+
+// ─────────────────────────────── In der Personalakte ───────────────────────────────
+
+/** Was ein Mitglied im laufenden Jahr geleistet hat – mit dem Weg zum Dienstnachweis. */
+function personalakteEinsaetze(id) {
+  if (!Z.daten.einsaetze) return null;
+  const jahr = heute().slice(0, 4);
+  const imJahr = Z.daten.einsaetze.filter((e) => tagVon_(e.beginn).slice(0, 4) === jahr);
+  const st = einsatzStunden_(imJahr, Z.daten.einsatzkraefte, jahr).find((x) => x.mitglied_id === id);
+  const nach = {};
+  Z.daten.einsaetze.forEach((e) => {
+    nach[e.id] = e;
+  });
+  const je = {};
+  Z.daten.einsatzkraefte.forEach((k) => {
+    if (k.mitglied_id !== id || k.art === 'mittel' || !nach[k.einsatz_id]) return;
+    const x = (je[k.einsatz_id] = je[k.einsatz_id] || { e: nach[k.einsatz_id], minuten: 0, atemschutz: false });
+    x.minuten += minuten_(k.von, k.bis);
+    if (k.atemschutz) x.atemschutz = true;
+  });
+  const zeilen = Object.keys(je).map((k) => je[k]).sort((a, b) => vergleich(b.e.beginn, a.e.beginn));
+  const teil = (art) => (st && st.arten[art].anzahl ? plural(st.arten[art].anzahl, EINSATZ_ART_TEXT[art], { einsatz: 'Einsätze', uebung: 'Übungen', wache: 'Wachen', sonstiges: 'Dienste' }[art]) + ' · ' + stundenText_(st.arten[art].minuten) : null);
+  return [
+    h('div.abschnitt-titel', 'Einsätze & Stunden ' + jahr),
+    h('div.knopfreihe', { style: { marginBottom: '10px' } },
+      h('span', st ? [EINSATZ_ARTEN.map(teil).filter(Boolean).join(' · '), ' – zusammen ', h('strong', stundenText_(st.minuten)), st.atemschutz ? ', ' + st.atemschutz + '× unter Atemschutz' : ''] : 'In diesem Jahr noch kein Dienst erfasst.'),
+      h('span', { style: { flex: 1 } }),
+      h('button.btn.btn-klein', { onclick: () => dienstnachweisDialog(id) }, icon('drucken', 14), 'Dienstnachweis (PDF)')),
+    zeilen.length ? h('div.karte', tabelle({
+      zustand: {},
+      schluessel: (x) => x.e.id,
+      zeilen: zeilen,
+      seite: 8,
+      klick: (x) => gehe('/einsaetze/' + x.e.id),
+      spalten: [
+        { id: 'datum', titel: 'Datum', zelle: (x) => h('span', { style: { whiteSpace: 'nowrap' } }, datum(tagVon_(x.e.beginn))) },
+        { id: 'art', titel: 'Art', zelle: (x) => einsatzArtBadge(x.e.art) },
+        { id: 'dienst', titel: 'Dienst', zelle: (x) => h('strong', x.e.bezeichnung) },
+        { id: 'dauer', titel: 'Dauer', klasse: 'rechts', zelle: (x) => dauerText_(x.minuten) },
+        { id: 'atem', titel: 'Atemschutz', zelle: (x) => (x.atemschutz ? h('span.badge.badge-blau', 'ja') : h('span.gedimmt', '–')) },
+      ],
+    })) : null,
+  ];
+}
+
+/**
+ * Der Dienstnachweis als PDF. Mit oder ohne Qualifikationen: Wer ihn dem Arbeitgeber
+ * gibt, will die G26.3 nicht mitschicken.
+ */
+function dienstnachweisDialog(id) {
+  const m = Z.idx.mitglied.get(id);
+  if (!m) return;
+  formular({
+    titel: 'Dienstnachweis für ' + m.name,
+    werte: { jahr: heute().slice(0, 4), qualifikationen: true },
+    speichernText: 'PDF erzeugen',
+    inhalt: (w) => [
+      feld('Jahr', auswahl(w, 'jahr', einsatzJahre().map((j) => [j, j]))),
+      haken(w, 'qualifikationen', 'Qualifikationen und Atemschutz aufnehmen'),
+      h('p.klein.gedimmt', 'Ohne Haken nur die Dienstzeiten – etwa für den Arbeitgeber, den Gesundheitsdaten wie die G26.3 nichts angehen.'),
+    ],
+    speichern: (w) => pdfHolen('personal.nachweisPdf', { mitglied_id: id, jahr: w.jahr, qualifikationen: !!w.qualifikationen }),
+  });
+}
+</script>

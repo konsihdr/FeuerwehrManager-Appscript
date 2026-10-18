@@ -1,0 +1,1041 @@
+<script>
+/**
+ * Dialoge: anlegen, bearbeiten, umlagern, prüfen – und die Geräteakte.
+ *
+ * Gespeichert wird über `Sync.tun` (`js_sync.html`): Die Änderung steht sofort da, der
+ * Dialog geht zu, die Tabelle holt im Hintergrund nach. Die Seite dahinter und lebendige
+ * Dialoge zeichnen sich mit jedem Stand von selbst neu – kein Dialog muss wissen, wer
+ * seine Änderung sonst noch anzeigt. Was eine Antwort des Servers braucht, bevor es
+ * weitergeht (Ausweis, Kopplungscode, Gerät löschen), geht weiter über `api()`.
+ */
+'use strict';
+
+function sortiertNachName(liste, feldName) {
+  return liste.slice().sort((a, b) => vergleich(a[feldName || 'name'], b[feldName || 'name']));
+}
+
+function ortOptionen(leer) {
+  return [['', leer || '– Lagerplatz wählen –']].concat(
+    sortiertNachName(Z.daten.lagerplaetze).map((o) => [o.id, o.name + ' (' + ORT_TYP_TEXT[o.typ] + ')']));
+}
+
+function typOptionen(leer) {
+  return [['', leer || '– Gerätetyp wählen –']].concat(sortiertNachName(Z.daten.typen).map((t) => [t.id, t.name]));
+}
+
+// ─────────────────────────────── Gerät ───────────────────────────────
+
+function geraetFormular(g, vorgabe) {
+  const neu = !g;
+  const werte = neu
+    ? Object.assign({ geraetetyp_id: '', lagerplatz_id: '', status: 'einsatzbereit', bezeichnung: '', seriennummer: '', barcode: '', bemerkung: '' }, vorgabe || {})
+    : Object.assign({}, g);
+  formular({
+    titel: neu ? 'Neues Gerät' : 'Gerät bearbeiten',
+    werte: werte,
+    inhalt: (w, c) => {
+      const plaene = w.geraetetyp_id ? Z.daten.plaene.filter((p) => p.geraetetyp_id === w.geraetetyp_id && !p.geraet_id) : [];
+      return [
+        feld('Gerätetyp', auswahl(w, 'geraetetyp_id', typOptionen(), null, () => c.neu()),
+          !Z.daten.typen.length ? 'Noch keine Gerätetypen – zuerst unter „Gerätetypen & Prüfpläne“ anlegen.' : null),
+        h('div.zeile',
+          feld('Bezeichnung', eingabe(w, 'bezeichnung', { placeholder: 'z. B. PA01' }), 'Eigene Kurzbezeichnung, je Wehr eindeutig.'),
+          feld('Seriennummer', eingabe(w, 'seriennummer'))),
+        h('div.zeile',
+          feld('Barcode', eingabe(w, 'barcode', { placeholder: neu ? 'leer = automatisch' : '', class: 'mono' }),
+            neu ? 'Leer lassen – dann vergibt die Anwendung einen.' : 'Steht auf dem Etikett. Nur ändern, wenn ein neues klebt.'),
+          neu
+            ? feld('Lagerplatz', auswahl(w, 'lagerplatz_id', ortOptionen()))
+            : feld('Status', auswahl(w, 'status', ALLE_STATUS.map((s) => [s, STATUS_TEXT[s]])))),
+        neu ? null : h('p.klein.gedimmt', 'Der Standort ändert sich nur durch Umlagern – damit die Bewegungshistorie lückenlos bleibt.'),
+        feld('Bemerkung', textfeld(w, 'bemerkung', { rows: 3 })),
+        neu && w.geraetetyp_id
+          ? h('div.infobox', h('span', plaene.length
+            ? 'Prüfpläne des Typs: ' + plaene.map((p) => p.name + ' (' + intervallText(p.intervall_wert, p.intervall_einheit) + ')').join(', ') +
+              '. Der erste Termin ist heute plus Intervall – in der Geräteakte lässt er sich anpassen.'
+            : 'Dieser Gerätetyp hat keinen Prüfplan. Das Gerät wird nie zur Prüfung erinnert.'))
+          : null,
+      ];
+    },
+    sperre: (w) => (!w.geraetetyp_id ? 'Gerätetyp wählen' : neu && !w.lagerplatz_id ? 'Lagerplatz wählen' : null),
+    speichern: (w) => {
+      const id = neu ? neueId() : g.id;
+      const r = Sync.tun('geraete.speichern', {
+        id: neu ? undefined : g.id,
+        neu_id: neu ? id : undefined,
+        geraetetyp_id: w.geraetetyp_id,
+        lagerplatz_id: neu ? w.lagerplatz_id : undefined,
+        bezeichnung: w.bezeichnung,
+        seriennummer: w.seriennummer,
+        barcode: w.barcode,
+        status: w.status,
+        bemerkung: w.bemerkung,
+      });
+      if (!neu) {
+        meldung.erfolg('Gespeichert.');
+        return r;
+      }
+      meldung.erfolg(geraetTitel(Z.idx.geraet.get(id)) + ' angelegt.');
+      // Den Barcode vergibt der Server – für das Etikett soll man ihn trotzdem gleich lesen.
+      if (!String(w.barcode || '').trim()) {
+        r.bestaetigt.then((x) => {
+          const da = x.ok && Z.idx.geraet.get(id);
+          if (da && da.barcode) meldung.info(geraetTitel(da) + ' hat den Barcode ' + da.barcode + '.');
+        });
+      }
+      return r;
+    },
+  });
+}
+
+async function geraetLoeschen(g) {
+  const ok = await bestaetigen({
+    titel: geraetTitel(g) + ' löschen?',
+    text: ['Das geht nur, solange das Gerät keine Geschichte hat – keine Buchung, keine Prüfung, keine Zählung. ' +
+      'Ein Gerät, das schon im Dienst war, wird ausgemustert statt gelöscht: Seine Nachweise bleiben dann lesbar.'],
+    ja: 'Löschen',
+    gefahr: true,
+  });
+  if (!ok) return false;
+  try {
+    await api('geraete.loeschen', { id: g.id });
+    meldung.erfolg(geraetTitel(g) + ' gelöscht.');
+    return true;
+  } catch (e) {
+    meldung.fehler(e);
+    return false;
+  }
+}
+
+function umlagernErgebnis(r) {
+  if (!r.gebucht) return r.schonDa === 1 ? 'Das Gerät stand schon dort.' : 'Alle standen schon dort – nichts gebucht.';
+  return plural(r.gebucht, 'Gerät', 'Geräte') + ' gebucht' + (r.schonDa ? ', ' + r.schonDa + ' standen schon dort.' : '.');
+}
+
+function umlagernDialog(ids, danach) {
+  const geraete = ids.map((id) => Z.idx.geraet.get(id)).filter(Boolean);
+  formular({
+    titel: 'Umlagern',
+    werte: { nach: '', grund: '', bemerkung: '' },
+    inhalt: (w) => [
+      h('div.klein.gedimmt', { style: { marginBottom: '14px' } },
+        geraete.slice(0, 8).map((g) => geraetTitel(g)).join(', ') + (geraete.length > 8 ? ' und ' + (geraete.length - 8) + ' weitere' : '')),
+      feld('Wohin?', auswahl(w, 'nach', ortOptionen())),
+      feld('Warum?', auswahl(w, 'grund', [['', '– Grund wählen –']].concat(
+        Z.daten.gruende.filter((g) => g.aktiv).sort((a, b) => a.position - b.position)
+          .map((g) => [g.id, g.name + (g.status_danach ? ' → ' + STATUS_TEXT[g.status_danach] : '')]))),
+      'Der Grund bestimmt den Zustand danach: „Einsatz“ heißt reinigen. Defekte und ausgemusterte Geräte behalten ihren Status.'),
+      feld('Bemerkung', eingabe(w, 'bemerkung', { placeholder: 'optional, z. B. Einsatznummer' })),
+    ],
+    sperre: (w) => (!w.nach ? 'Ziel wählen' : !w.grund ? 'Grund wählen' : null),
+    speichernText: geraete.length === 1 ? 'Buchen' : geraete.length + ' Geräte buchen',
+    speichern: (w) => {
+      const r = Sync.tun('betrieb.umlagern', { geraete: ids, nach: w.nach, grund: w.grund, bemerkung: w.bemerkung });
+      meldung.erfolg(umlagernErgebnis(r.vorschau));
+      if (danach) danach(r.vorschau);
+      return r;
+    },
+  });
+}
+
+function statusDialog(ids, danach) {
+  const geraete = ids.map((id) => Z.idx.geraet.get(id)).filter(Boolean);
+  const gemeinsam = geraete.every((g) => g.status === geraete[0].status) ? geraete[0].status : '';
+  formular({
+    titel: 'Status setzen',
+    werte: { status: gemeinsam || 'einsatzbereit', bemerkung: '' },
+    inhalt: (w) => [
+      h('div.klein.gedimmt', { style: { marginBottom: '14px' } }, geraete.slice(0, 8).map(geraetTitel).join(', ') +
+        (geraete.length > 8 ? ' und ' + (geraete.length - 8) + ' weitere' : '')),
+      feld('Neuer Status', auswahl(w, 'status', ALLE_STATUS.map((s) => [s, STATUS_TEXT[s]]))),
+      feld('Notiz', eingabe(w, 'bemerkung', { placeholder: 'optional – wird an die Bemerkung angehängt' })),
+    ],
+    speichern: (w) => {
+      const r = Sync.tun('betrieb.statusSetzen', { geraete: ids, status: w.status, bemerkung: w.bemerkung });
+      meldung.erfolg(plural(ids.length, 'Gerät', 'Geräte') + ': ' + STATUS_TEXT[w.status]);
+      if (danach) danach();
+      return r;
+    },
+  });
+}
+
+// ─────────────────────────────── Prüfung ───────────────────────────────
+
+function pruefungDialog(geraetId, planId) {
+  const g = Z.idx.geraet.get(geraetId);
+  const plan = Z.idx.plan.get(planId);
+  if (!g || !plan) return;
+  const schritte = Z.daten.schritte.filter((s) => s.pruefplan_id === planId).sort((a, b) => a.position - b.position);
+  const stand = (Z.idx.standVon.get(geraetId) || []).find((s) => s.pruefplan_id === planId);
+  const ein = {};
+  schritte.forEach((s) => {
+    ein[s.id] = { ok: null, wert: '', notiz: '' };
+  });
+  const offen = () => schritte.filter((s) => s.pflicht && (s.art === 'haken' ? ein[s.id].ok !== true : !ein[s.id].wert.trim()));
+
+  formular({
+    titel: 'Prüfung erfassen',
+    breite: schritte.length ? 'mittel' : null,
+    werte: { ergebnis: 'bestanden', datum: heute(), bemerkung: '', status_danach: 'auto' },
+    inhalt: (w, c) => {
+      const o = offen();
+      // Dieselbe Funktion, mit der der Server entscheidet (`05_Gemeinsam.js`).
+      const auto = statusNachPruefung_(g.status, w.ergebnis);
+      return [
+        h('div.detail-raster',
+          h('div.detail-feld', h('span', 'Gerät'), h('strong', geraetTitel(g) + ' · ' + g.barcode)),
+          h('div.detail-feld', h('span', 'Prüfplan'), h('strong', plan.name)),
+          h('div.detail-feld', h('span', 'Intervall'), h('strong', intervallText(stand && stand.abw_wert || plan.intervall_wert, stand && stand.abw_einheit || plan.intervall_einheit))),
+          stand ? h('div.detail-feld', h('span', 'Fällig am'), h('strong', datum(stand.naechste_faellig) + ' · ' + faelligText(tageBis(stand.naechste_faellig)))) : null),
+        schritte.length ? [
+          h('div.abschnitt-titel', 'Prüfschritte', o.length ? h('span.badge.badge-gelb', o.length + ' offen') : h('span.badge.badge-gruen', 'alle erledigt')),
+          h('div.schritte', schritte.map((s, i) => {
+            const e = ein[s.id];
+            const erledigt = s.art === 'haken' ? e.ok === true : !!e.wert.trim();
+            return h('div.schritt' + (erledigt ? '.erledigt' : '') + (e.ok === false ? '.beanstandet' : ''),
+              h('span.schritt-nr', i + 1),
+              h('div.schritt-inhalt',
+                h('div.schritt-titel', s.titel, s.pflicht ? null : h('span.badge.badge-grau', { style: { marginLeft: '8px' } }, 'optional')),
+                s.beschreibung ? h('div.klein.gedimmt', s.beschreibung) : null,
+                s.art === 'haken' ? h('div.schritt-wahl',
+                  h('button.wahl' + (e.ok === true ? '.aktiv-ok' : ''), { type: 'button', onclick: () => { e.ok = e.ok === true ? null : true; c.neu(); } }, 'In Ordnung'),
+                  h('button.wahl' + (e.ok === false ? '.aktiv-fehler' : ''), { type: 'button', onclick: () => { e.ok = e.ok === false ? null : false; c.neu(); } }, 'Beanstandet')) : null,
+                s.art === 'messwert' ? h('div.schritt-wert',
+                  h('input', { id: 'schritt-' + s.id, value: e.wert, inputmode: 'decimal', placeholder: 'Messwert', oninput: (ev) => { e.wert = ev.target.value; c.neu(); } }),
+                  s.einheit ? h('span.einheit', s.einheit) : null) : null,
+                s.art === 'text' ? h('textarea', { id: 'schritt-' + s.id, rows: 2, value: e.wert, placeholder: 'Befund zu diesem Schritt', oninput: (ev) => { e.wert = ev.target.value; c.neu(); } }) : null,
+                s.art === 'haken' && e.ok === false ? h('input', { id: 'notiz-' + s.id, value: e.notiz, placeholder: 'Was wurde beanstandet?', oninput: (ev) => { e.notiz = ev.target.value; } }) : null));
+          })),
+        ] : null,
+        h('div.abschnitt-titel', 'Ergebnis'),
+        h('div.ergebnis-wahl',
+          h('button.ok' + (w.ergebnis === 'bestanden' ? '.aktiv' : ''), { type: 'button', onclick: () => { w.ergebnis = 'bestanden'; c.neu(); } }, '✓ Bestanden'),
+          h('button.nok' + (w.ergebnis === 'nicht_bestanden' ? '.aktiv' : ''), { type: 'button', onclick: () => { w.ergebnis = 'nicht_bestanden'; c.neu(); } }, '✕ Nicht bestanden')),
+        h('div.zeile',
+          feld('Geprüft am', eingabe(w, 'datum', { type: 'date', max: heute() })),
+          feld('Status danach', auswahl(w, 'status_danach', [
+            ['auto', 'Automatisch → ' + STATUS_TEXT[auto]],
+            ['unveraendert', 'Unverändert lassen (' + STATUS_TEXT[g.status] + ')'],
+          ].concat(ALLE_STATUS.map((s) => [s, STATUS_TEXT[s]]))))),
+        w.ergebnis === 'bestanden'
+          ? h('p.klein.gedimmt', 'Der nächste Termin rückt auf ' + datum(datumPlus_(w.datum || heute(), stand && stand.abw_wert || plan.intervall_wert, stand && stand.abw_einheit || plan.intervall_einheit)) + '.')
+          : h('p.klein.gedimmt', 'Nicht bestanden: Der Termin bleibt fällig, bis eine bestandene Prüfung erfasst ist.'),
+        feld('Bemerkung', textfeld(w, 'bemerkung', { rows: 2 })),
+      ];
+    },
+    sperre: (w) => {
+      const o = offen();
+      return w.ergebnis === 'bestanden' && o.length ? 'Noch ' + o.length + ' Pflichtschritt' + (o.length === 1 ? '' : 'e') + ' offen' : null;
+    },
+    speichernText: 'Prüfung speichern',
+    speichern: (w) => {
+      const id = neueId();
+      const r = Sync.tun('pruefungen.erfassen', {
+        neu_id: id,
+        geraet: geraetId,
+        plan: planId,
+        ergebnis: w.ergebnis,
+        datum: w.datum,
+        bemerkung: w.bemerkung,
+        status_danach: w.status_danach,
+        schritte: schritte.map((s) => ({ id: s.id, ok: ein[s.id].ok, wert: ein[s.id].wert, notiz: ein[s.id].notiz })),
+      });
+      // Der Nachweis wartet, bis die Prüfung in der Tabelle steht (`api` wartet auf die Schlange).
+      meldung.tat('Prüfung erfasst.', 'Nachweis als PDF', () => pdfHolen('pruefungen.nachweis', { id: id }).catch(meldung.fehler.bind(meldung)));
+      return r;
+    },
+  });
+}
+
+function faelligkeitDialog(s) {
+  const plan = Z.idx.plan.get(s.pruefplan_id);
+  const anfang = { naechste_faellig: s.naechste_faellig, aktiv: s.aktiv, abw_wert: s.abw_wert || '', abw_einheit: s.abw_einheit || '' };
+  formular({
+    titel: 'Fälligkeit · ' + (plan ? plan.name : ''),
+    werte: Object.assign({}, anfang),
+    inhalt: (w) => [
+      feld('Nächste Fälligkeit', eingabe(w, 'naechste_faellig', { type: 'date' }), 'Von Hand gesetzt, etwa für ein Gerät, dessen letzte Prüfung vor der Erfassung lag.'),
+      h('div.abschnitt-titel', 'Abweichendes Intervall nur für dieses Gerät'),
+      h('div.zeile',
+        feld('Wert', eingabe(w, 'abw_wert', { type: 'number', min: 1, placeholder: plan ? String(plan.intervall_wert) : '' })),
+        feld('Einheit', auswahl(w, 'abw_einheit', [['', plan ? '(Plan: ' + EINHEIT_TEXT[plan.intervall_einheit] + ')' : '–']].concat(Object.keys(EINHEIT_TEXT).map((k) => [k, EINHEIT_TEXT[k]]))))),
+      h('p.klein.gedimmt', 'Beides leer: Es gilt das Intervall des Plans (' + (plan ? intervallText(plan.intervall_wert, plan.intervall_einheit) : '–') + ').'),
+      haken(w, 'aktiv', 'Dieser Plan gilt für dieses Gerät'),
+    ],
+    speichern: (w) => {
+      const a = { id: s.id, aktiv: !!w.aktiv };
+      if (w.naechste_faellig !== anfang.naechste_faellig) a.naechste_faellig = w.naechste_faellig;
+      if (String(w.abw_wert) !== String(anfang.abw_wert) || w.abw_einheit !== anfang.abw_einheit) {
+        a.abw_wert = w.abw_wert === '' ? null : Number(w.abw_wert);
+        a.abw_einheit = w.abw_einheit || null;
+      }
+      const r = Sync.tun('faelligkeit.aendern', a);
+      meldung.erfolg('Fälligkeit gespeichert.');
+      return r;
+    },
+  });
+}
+
+// ─────────────────────────────── Geräteakte ───────────────────────────────
+
+/**
+ * Die Geräteakte. Vom Geräte-Bildschirm aus steht sie in der Adresse
+ * (`/geraete/<id>`), damit sie sich verschicken lässt und ein Neuladen übersteht;
+ * von anderswo geht sie als Dialog darüber auf, ohne den Ort zu wechseln.
+ */
+let offeneAkte = null;
+
+function akteOeffnen(id) {
+  if (Router.teile()[0] === 'geraete') gehe('/geraete/' + id, true);
+  else akteDialog(id);
+}
+
+function akteDialog(id, beimSchliessen) {
+  if (offeneAkte && !offeneAkte.zu) {
+    if (offeneAkte.geraetId === id) return offeneAkte;
+    offeneAkte.schliessen();
+  }
+  const z = { reiter: 'plaene', akte: null, laedt: true, fehler: '', holt: false, nochmal: false };
+  // Jeder neue Stand lädt Bewegungen und Nachweise nach – aber nicht zweimal gleichzeitig.
+  const laden = async () => {
+    if (z.holt) {
+      z.nochmal = true;
+      return;
+    }
+    z.holt = true;
+    try {
+      z.akte = await api('geraete.akte', { id: id }, { still: true });
+      z.fehler = '';
+    } catch (e) {
+      z.fehler = e.message;
+    }
+    z.holt = false;
+    z.laedt = false;
+    if (!ctrl.zu) ctrl.neu();
+    if (z.nochmal && !ctrl.zu) {
+      z.nochmal = false;
+      laden();
+    }
+  };
+  const ctrl = dialog({
+    titel: 'Geräteakte',
+    breite: 'breit',
+    lebendig: true,
+    beiDaten: (c) => {
+      c.neu();
+      laden();
+    },
+    inhalt: (c) => akteInhalt(id, z, c),
+    beimSchliessen: beimSchliessen,
+  });
+  ctrl.geraetId = id;
+  offeneAkte = ctrl;
+  laden();
+  return ctrl;
+}
+
+function akteInhalt(id, z, c) {
+  const g = Z.idx.geraet.get(id);
+  if (!g) return h('div.leer', 'Dieses Gerät gibt es nicht (mehr).');
+  const typ = Z.idx.typ.get(g.geraetetyp_id);
+  const satz = g.satz_id ? Z.idx.satz.get(g.satz_id) : null;
+  c.titel(geraetTitel(g) + (g.bezeichnung && typ ? ' · ' + typ.name : ''));
+  const stand = (Z.idx.standVon.get(id) || []).slice().sort((a, b) => vergleich(a.naechste_faellig, b.naechste_faellig));
+  const technik = istTechnik();
+  const akte = z.akte || { pruefungen: [], buchungen: [], zaehlungen: [] };
+
+  const reiter = [
+    ['plaene', 'Prüfpläne', stand.length],
+    ['pruefungen', 'Prüfnachweise', z.akte ? akte.pruefungen.length : '…'],
+    ['buchungen', 'Bewegungen', z.akte ? akte.buchungen.length : '…'],
+    ['zaehlungen', 'Zählungen', z.akte ? akte.zaehlungen.length : '…'],
+  ];
+
+  let inhalt;
+  if (z.reiter === 'plaene') {
+    inhalt = h('div',
+      tabelle({
+        zustand: ui('akte-plaene'),
+        neu: () => c.neu(),
+        schluessel: (s) => s.id,
+        zeilen: stand,
+        leer: 'Für diesen Gerätetyp gibt es keinen Prüfplan.',
+        spalten: [
+          { id: 'plan', titel: 'Prüfung', zelle: (s) => {
+            const p = Z.idx.plan.get(s.pruefplan_id);
+            return [h('strong', p ? p.name : '–'), p && p.geraet_id ? h('span.badge.badge-blau', { style: { marginLeft: '6px' } }, 'nur dieses Gerät') : null,
+              s.aktiv ? null : h('span.badge.badge-grau', { style: { marginLeft: '6px' } }, 'abgeschaltet')];
+          } },
+          { id: 'intervall', titel: 'Intervall', zelle: (s) => {
+            const p = Z.idx.plan.get(s.pruefplan_id);
+            return s.abw_wert ? [intervallText(s.abw_wert, s.abw_einheit), h('div.klein.gedimmt', 'abweichend vom Plan')] : p ? intervallText(p.intervall_wert, p.intervall_einheit) : '–';
+          } },
+          { id: 'faellig', titel: 'Fällig', zelle: (s) => (s.aktiv ? [faelligBadge(tageBis(s.naechste_faellig)), h('div.klein.gedimmt', datum(s.naechste_faellig))] : h('span.gedimmt', '–')) },
+          { id: 'zuletzt', titel: 'Zuletzt', zelle: (s) => datum(s.zuletzt_geprueft) },
+        ],
+        aktion: technik && g.status !== 'ausgemustert' ? (s) => [
+          h('button.btn.btn-klein', { onclick: () => faelligkeitDialog(s) }, 'Termin …'),
+          s.aktiv ? h('button.btn.btn-klein.btn-primary', { onclick: () => pruefungDialog(id, s.pruefplan_id) }, 'Prüfung erfassen') : null,
+        ] : null,
+      }),
+      technik ? h('div', { style: { marginTop: '12px' } }, h('button.btn.btn-klein', { onclick: () => planFormular(null, { geraetetyp_id: g.geraetetyp_id, geraet_id: g.id }) }, icon('plus', 14), 'Sonderplan nur für dieses Gerät')) : null);
+  } else if (z.laedt) {
+    inhalt = h('div.laden', 'Lädt die Akte …');
+  } else if (z.fehler) {
+    inhalt = h('p.fehlertext', z.fehler);
+  } else if (z.reiter === 'pruefungen') {
+    inhalt = tabelle({
+      zustand: ui('akte-pruefungen'),
+      neu: () => c.neu(),
+      schluessel: (p) => p.id,
+      zeilen: akte.pruefungen,
+      leer: 'Noch keine Prüfung erfasst.',
+      spalten: [
+        { id: 'datum', titel: 'Geprüft am', zelle: (p) => h('strong', datum(p.geprueft_am)) },
+        { id: 'plan', titel: 'Prüfplan', zelle: (p) => p.plan_name },
+        { id: 'ergebnis', titel: 'Ergebnis', zelle: (p) => {
+          const beanstandet = (p.schritte || []).filter((s) => s.ok === false).length;
+          return [h('span.badge.' + (p.ergebnis === 'bestanden' ? 'badge-gruen' : 'badge-rot'), p.ergebnis === 'bestanden' ? 'bestanden' : 'nicht bestanden'),
+            beanstandet ? h('div.klein.gedimmt', plural(beanstandet, 'Schritt beanstandet', 'Schritte beanstandet')) : null];
+        } },
+        { id: 'pruefer', titel: 'Prüfer', zelle: (p) => p.benutzer_name || '–' },
+        { id: 'bemerkung', titel: 'Bemerkung', klasse: 'oben', zelle: (p) => h('span.klein', p.bemerkung || '') },
+      ],
+      aktion: (p) => h('button.btn.btn-klein', { onclick: () => pdfHolen('pruefungen.nachweis', { id: p.id }).catch(meldung.fehler.bind(meldung)) }, icon('download', 14), 'PDF'),
+    });
+  } else if (z.reiter === 'buchungen') {
+    inhalt = tabelle({
+      zustand: ui('akte-buchungen'),
+      neu: () => c.neu(),
+      schluessel: (b) => b.id,
+      zeilen: akte.buchungen,
+      leer: 'Noch nie umgelagert.',
+      spalten: [
+        { id: 'zeit', titel: 'Wann', zelle: (b) => h('span.klein', datumZeit(b.gebucht_am)) },
+        { id: 'weg', titel: 'Von → Nach', zelle: (b) => [h('span.gedimmt', b.von_name || '–'), ' → ', h('strong', b.nach_name)] },
+        { id: 'grund', titel: 'Grund', zelle: (b) => b.grund_name || '–' },
+        { id: 'wer', titel: 'Wer', zelle: (b) => b.benutzer_name || '–' },
+        { id: 'bemerkung', titel: 'Bemerkung', zelle: (b) => h('span.klein', b.bemerkung || '') },
+      ],
+    });
+  } else {
+    inhalt = tabelle({
+      zustand: ui('akte-zaehlungen'),
+      neu: () => c.neu(),
+      schluessel: (x, i) => x.beendet_am + x.lagerplatz_name,
+      zeilen: akte.zaehlungen,
+      leer: 'Noch in keinem Inventurgang erfasst.',
+      spalten: [
+        { id: 'zeit', titel: 'Wann', zelle: (x) => h('span.klein', datumZeit(x.beendet_am)) },
+        { id: 'ort', titel: 'Gezählt in', zelle: (x) => x.lagerplatz_name },
+        { id: 'ergebnis', titel: 'Befund', zelle: (x) => h('span.badge.' + ({ gefunden: 'badge-gruen', fehlt: 'badge-rot', fremd: 'badge-gelb' }[x.ergebnis]),
+          { gefunden: 'gefunden', fehlt: 'fehlte', fremd: 'lag dort fremd' }[x.ergebnis]) },
+        { id: 'wer', titel: 'Gezählt von', zelle: (x) => x.benutzer_name || '–' },
+      ],
+    });
+  }
+
+  return [
+    h('div.knopfreihe', { style: { marginBottom: '16px' } },
+      statusBadge(g.status),
+      satz ? h('span.badge.badge-blau', 'Satz: ' + satz.name) : null,
+      h('span.mono.gedimmt', g.barcode)),
+    h('div.detail-raster',
+      h('div.detail-feld', h('span', 'Gerätetyp'), h('strong', typ ? typ.name : '–'), typ && (typ.hersteller || typ.modell) ? h('div.klein.gedimmt', [typ.hersteller, typ.modell].filter(Boolean).join(' · ')) : null),
+      h('div.detail-feld', h('span', 'Standort'), h('strong', ortZeile(g.lagerplatz_id))),
+      h('div.detail-feld', h('span', 'Seriennummer'), h('strong', g.seriennummer || '–')),
+      h('div.detail-feld', h('span', 'Angelegt'), h('strong', datum(g.angelegt_am))),
+      g.bemerkung ? h('div.detail-feld', { style: { gridColumn: '1 / -1' } }, h('span', 'Bemerkung'), h('div', { style: { whiteSpace: 'pre-line', fontWeight: 400 } }, g.bemerkung)) : null),
+    h('div.knopfreihe', { style: { marginBottom: '6px' } },
+      h('button.btn.btn-klein', { onclick: () => umlagernDialog([id]) }, icon('umlagern', 14), 'Umlagern'),
+      technik ? h('button.btn.btn-klein', { onclick: () => statusDialog([id]) }, 'Status …') : null,
+      technik ? h('button.btn.btn-klein', { onclick: () => geraetFormular(g) }, icon('stift', 14), 'Bearbeiten') : null,
+      h('button.btn.btn-klein', { onclick: () => etikettenFuer('geraete', [id]) }, icon('etikett', 14), 'Etikett'),
+      technik ? h('button.btn.btn-klein.btn-gefahr', {
+        onclick: async () => {
+          if (await geraetLoeschen(g)) c.schliessen();
+        },
+      }, icon('muell', 14), 'Löschen') : null),
+    h('div.reiter', reiter.map((r) => h('button' + (z.reiter === r[0] ? '.aktiv' : ''), { type: 'button', onclick: () => { z.reiter = r[0]; c.neu(); } }, r[1], h('span.zahl', r[2])))),
+    inhalt,
+  ];
+}
+
+// ─────────────────────────────── Stammdaten ───────────────────────────────
+
+function typFormular(t, danach) {
+  const neu = !t;
+  formular({
+    titel: neu ? 'Neuer Gerätetyp' : 'Gerätetyp bearbeiten',
+    werte: neu ? { name: '', hersteller: '', modell: '', beschreibung: '' } : Object.assign({}, t),
+    inhalt: (w) => [
+      feld('Name', eingabe(w, 'name', { placeholder: 'z. B. Pressluftatmer' })),
+      h('div.zeile', feld('Hersteller', eingabe(w, 'hersteller')), feld('Modell', eingabe(w, 'modell'))),
+      feld('Beschreibung', textfeld(w, 'beschreibung', { rows: 2 })),
+    ],
+    sperre: (w) => (!String(w.name || '').trim() ? 'Name angeben' : null),
+    speichern: (w) => {
+      const id = neu ? neueId() : t.id;
+      const r = Sync.tun('typen.speichern', { id: neu ? undefined : t.id, neu_id: neu ? id : undefined, name: w.name, hersteller: w.hersteller, modell: w.modell, beschreibung: w.beschreibung });
+      meldung.erfolg(neu ? 'Gerätetyp angelegt.' : 'Gespeichert.');
+      if (danach) danach(id);
+      return r;
+    },
+  });
+}
+
+function planFormular(p, vorgabe) {
+  const neu = !p;
+  const geraet = vorgabe && vorgabe.geraet_id ? Z.idx.geraet.get(vorgabe.geraet_id) : p && p.geraet_id ? Z.idx.geraet.get(p.geraet_id) : null;
+  formular({
+    titel: neu ? (geraet ? 'Sonderplan für ' + geraetTitel(geraet) : 'Neuer Prüfplan') : 'Prüfplan bearbeiten',
+    werte: neu ? Object.assign({ name: '', intervall_wert: 12, intervall_einheit: 'monate', beschreibung: '' }, vorgabe || {}) : Object.assign({}, p),
+    inhalt: (w) => [
+      h('p.klein.gedimmt', geraet
+        ? 'Gilt nur für ' + geraetTitel(geraet) + ', nicht für die übrigen Geräte des Typs ' + typName(geraet.geraetetyp_id) + '.'
+        : 'Gilt für alle Geräte des Typs ' + typName(w.geraetetyp_id) + ' – auch für die, die später dazukommen.'),
+      feld('Name', eingabe(w, 'name', { placeholder: 'z. B. Halbjahresprüfung' })),
+      h('div.zeile',
+        feld('Alle', eingabe(w, 'intervall_wert', { type: 'number', min: 1 })),
+        feld('Einheit', auswahl(w, 'intervall_einheit', Object.keys(EINHEIT_TEXT).map((k) => [k, EINHEIT_TEXT[k]])))),
+      feld('Beschreibung', textfeld(w, 'beschreibung', { rows: 2, placeholder: 'Grundlage, z. B. DGUV, vfdb, Herstellerangabe' })),
+      neu ? h('div.infobox', h('span', 'Jedes Gerät des Typs bekommt einen ersten Termin: heute plus Intervall. Prüfschritte (Checkliste) danach über „Schritte“.')) : null,
+      !neu ? h('p.klein.gedimmt', 'Ein geändertes Intervall verschiebt die Termine aller Geräte, deren letzte Prüfung bekannt ist.') : null,
+    ],
+    sperre: (w) => (!String(w.name || '').trim() ? 'Name angeben' : !(Number(w.intervall_wert) > 0) ? 'Intervall angeben' : null),
+    speichern: (w) => {
+      const r = Sync.tun('plaene.speichern', {
+        id: neu ? undefined : p.id,
+        neu_id: neu ? neueId() : undefined,
+        geraetetyp_id: w.geraetetyp_id,
+        geraet_id: neu ? w.geraet_id : undefined,
+        name: w.name,
+        intervall_wert: Number(w.intervall_wert),
+        intervall_einheit: w.intervall_einheit,
+        beschreibung: w.beschreibung,
+      });
+      meldung.erfolg(neu ? 'Prüfplan angelegt.' : 'Gespeichert.');
+      return r;
+    },
+  });
+}
+
+function schritteDialog(plan) {
+  const liste = Z.daten.schritte.filter((s) => s.pruefplan_id === plan.id).sort((a, b) => a.position - b.position)
+    .map((s) => Object.assign({}, s));
+  let zaehler = 0;
+  const leer = () => ({ schluessel: 'neu' + zaehler++, titel: '', art: 'haken', einheit: '', pflicht: true, beschreibung: '' });
+  if (!liste.length) liste.push(leer());
+  liste.forEach((s) => {
+    s.schluessel = s.schluessel || s.id;
+  });
+  formular({
+    titel: 'Prüfschritte · ' + plan.name,
+    breite: 'mittel',
+    werte: {},
+    inhalt: (w, c) => [
+      h('p.klein.gedimmt', 'Die Checkliste, die beim Erfassen abgearbeitet wird. Schon erfasste Prüfungen bleiben, wie sie waren – sie tragen ihre Schritte als Momentaufnahme.'),
+      liste.map((s, i) => h('div.editor-zeile',
+        h('span.schritt-nr', i + 1),
+        h('div',
+          h('input', { id: 'st-' + s.schluessel, value: s.titel, placeholder: 'Titel, z. B. Sichtprüfung Maskenkörper', oninput: (e) => { s.titel = e.target.value; } }),
+          h('input', { id: 'sb-' + s.schluessel, value: s.beschreibung || '', placeholder: 'Hinweis (optional)', style: { marginTop: '6px', fontSize: '13px' }, oninput: (e) => { s.beschreibung = e.target.value; } })),
+        h('div',
+          h('select', { id: 'sa-' + s.schluessel, onchange: (e) => { s.art = e.target.value; c.neu(); } },
+            Object.keys(SCHRITT_ART_TEXT).map((k) => h('option', { value: k, selected: s.art === k }, SCHRITT_ART_TEXT[k]))),
+          s.art === 'messwert' ? h('input', { id: 'se-' + s.schluessel, value: s.einheit || '', placeholder: 'Einheit', style: { marginTop: '6px' }, oninput: (e) => { s.einheit = e.target.value; } }) : null),
+        h('label.haken', { style: { marginTop: '8px' } }, h('input', { type: 'checkbox', checked: !!s.pflicht, onchange: (e) => { s.pflicht = e.target.checked; } }), h('span.klein', 'Pflicht')),
+        h('div.klein-knoepfe',
+          h('button', { type: 'button', title: 'Nach oben', disabled: i === 0, onclick: () => { liste.splice(i - 1, 0, liste.splice(i, 1)[0]); c.neu(); } }, icon('hoch', 14)),
+          h('button', { type: 'button', title: 'Nach unten', disabled: i === liste.length - 1, onclick: () => { liste.splice(i + 1, 0, liste.splice(i, 1)[0]); c.neu(); } }, icon('runter', 14)),
+          h('button', { type: 'button', title: 'Entfernen', onclick: () => { liste.splice(i, 1); c.neu(); } }, icon('muell', 14))))),
+      h('button.btn.btn-klein', { style: { marginTop: '12px' }, onclick: () => { liste.push(leer()); c.neu(); } }, icon('plus', 14), 'Schritt hinzufügen'),
+    ],
+    speichern: () => {
+      const schritte = liste.filter((s) => String(s.titel).trim()).map((s) => {
+        // Neue Schritte bekommen ihre Kennung hier – eine Prüfung, die gleich danach
+        // erfasst wird, muss sie schon kennen.
+        if (!s.id && !s.neu_id) s.neu_id = neueId();
+        return { id: s.id, neu_id: s.id ? undefined : s.neu_id, titel: s.titel, beschreibung: s.beschreibung, art: s.art, einheit: s.einheit, pflicht: !!s.pflicht };
+      });
+      const r = Sync.tun('schritte.speichern', { plan_id: plan.id, schritte: schritte });
+      meldung.erfolg(plural(schritte.length, 'Prüfschritt', 'Prüfschritte') + ' gespeichert.');
+      return r;
+    },
+  });
+}
+
+function ortFormular(o) {
+  const neu = !o;
+  const nachfahren = new Set();
+  if (o) {
+    const sammeln = (id) => Z.daten.lagerplaetze.filter((x) => x.ober_id === id).forEach((x) => {
+      nachfahren.add(x.id);
+      sammeln(x.id);
+    });
+    sammeln(o.id);
+  }
+  formular({
+    titel: neu ? 'Neuer Lagerplatz' : 'Lagerplatz bearbeiten',
+    werte: neu ? { name: '', code: '', typ: 'lager', ober_id: '' } : Object.assign({}, o, { ober_id: o.ober_id || '' }),
+    inhalt: (w) => [
+      feld('Name', eingabe(w, 'name', { placeholder: 'z. B. LF 10, Lager Hauptwache' })),
+      h('div.zeile',
+        feld('Typ', auswahl(w, 'typ', Object.keys(ORT_TYP_TEXT).map((k) => [k, ORT_TYP_TEXT[k]]))),
+        feld('Code', eingabe(w, 'code', { class: 'mono', placeholder: neu ? 'leer = automatisch' : '' }), 'Steht auf dem Lagerplatz-Etikett.')),
+      feld('Gehört zu', auswahl(w, 'ober_id', [['', '– keinem –']].concat(
+        sortiertNachName(Z.daten.lagerplaetze.filter((x) => !o || (x.id !== o.id && !nachfahren.has(x.id)))).map((x) => [x.id, x.name]))),
+      'Etwa ein Fahrzeug, das in der Fahrzeughalle steht.'),
+    ],
+    sperre: (w) => (!String(w.name || '').trim() ? 'Name angeben' : null),
+    speichern: (w) => {
+      const r = Sync.tun('lagerplaetze.speichern', { id: neu ? undefined : o.id, neu_id: neu ? neueId() : undefined, name: w.name, code: w.code, typ: w.typ, ober_id: w.ober_id || null });
+      meldung.erfolg(neu ? 'Lagerplatz angelegt.' : 'Gespeichert.');
+      return r;
+    },
+  });
+}
+
+function grundFormular(g) {
+  const neu = !g;
+  formular({
+    titel: neu ? 'Neuer Umlagerungsgrund' : 'Umlagerungsgrund bearbeiten',
+    werte: neu ? { name: '', beschreibung: '', status_danach: '', aktiv: true } : Object.assign({}, g, { status_danach: g.status_danach || '' }),
+    inhalt: (w) => [
+      feld('Name', eingabe(w, 'name', { placeholder: 'z. B. Einsatz' })),
+      feld('Beschreibung', eingabe(w, 'beschreibung', { placeholder: 'Was bedeutet der Grund für das Gerät?' })),
+      feld('Status danach', auswahl(w, 'status_danach', [['', 'unverändert lassen']].concat(ALLE_STATUS.map((s) => [s, STATUS_TEXT[s]]))),
+        'Defekte und ausgemusterte Geräte behalten ihren Status trotzdem – eine Buchung schreibt nichts gesund.'),
+      haken(w, 'aktiv', 'Im Buchungsdialog anbieten'),
+    ],
+    sperre: (w) => (!String(w.name || '').trim() ? 'Name angeben' : null),
+    speichern: (w) => {
+      const r = Sync.tun('gruende.speichern', { id: neu ? undefined : g.id, neu_id: neu ? neueId() : undefined, name: w.name, beschreibung: w.beschreibung, status_danach: w.status_danach, aktiv: !!w.aktiv });
+      meldung.erfolg(neu ? 'Grund angelegt.' : 'Gespeichert.');
+      return r;
+    },
+  });
+}
+
+// ─────────────────────────────── Sätze ───────────────────────────────
+
+function satzFormular(s, danach) {
+  const neu = !s;
+  formular({
+    titel: neu ? 'Neuer Gerätesatz' : 'Gerätesatz bearbeiten',
+    werte: neu ? { name: '', satzart_id: '', barcode: '', bemerkung: '' } : Object.assign({}, s, { satzart_id: s.satzart_id || '' }),
+    inhalt: (w) => [
+      feld('Name', eingabe(w, 'name', { placeholder: 'z. B. AS-Satz 1' })),
+      h('div.zeile',
+        feld('Vorlage (Satzart)', auswahl(w, 'satzart_id', [['', '– frei, ohne Vorlage –']].concat(sortiertNachName(Z.daten.satzarten).map((a) => [a.id, a.name])))),
+        feld('Barcode', eingabe(w, 'barcode', { class: 'mono', placeholder: neu ? 'leer = automatisch' : '' }))),
+      feld('Bemerkung', textfeld(w, 'bemerkung', { rows: 2 })),
+    ],
+    sperre: (w) => (!String(w.name || '').trim() ? 'Name angeben' : null),
+    speichern: (w) => {
+      const id = neu ? neueId() : s.id;
+      const r = Sync.tun('saetze.speichern', { id: neu ? undefined : s.id, neu_id: neu ? id : undefined, name: w.name, satzart_id: w.satzart_id || null, barcode: w.barcode, bemerkung: w.bemerkung });
+      meldung.erfolg(neu ? 'Gerätesatz angelegt.' : 'Gespeichert.');
+      if (danach) danach(id);
+      return r;
+    },
+  });
+}
+
+function satzartFormular(a) {
+  const neu = !a;
+  const teile = (a ? Z.daten.satzteile.filter((t) => t.satzart_id === a.id) : []).map((t) => Object.assign({}, t));
+  formular({
+    titel: neu ? 'Neue Satzart (Vorlage)' : 'Satzart bearbeiten',
+    breite: 'mittel',
+    werte: neu ? { name: '', beschreibung: '' } : Object.assign({}, a),
+    inhalt: (w, c) => [
+      feld('Name', eingabe(w, 'name', { placeholder: 'z. B. Atemschutzgerät' })),
+      feld('Beschreibung', eingabe(w, 'beschreibung')),
+      h('div.abschnitt-titel', 'Was gehört hinein?'),
+      teile.length ? null : h('p.klein.gedimmt', 'Noch keine Teile. Ohne Teile ist jeder Satz dieser Art „vollständig“.'),
+      teile.map((t, i) => h('div.zeile', { style: { alignItems: 'end' } },
+        feld('Gerätetyp', h('select', { id: 'tt-' + i, onchange: (e) => { t.geraetetyp_id = e.target.value; } },
+          typOptionen().map((o) => h('option', { value: o[0], selected: t.geraetetyp_id === o[0] }, o[1])))),
+        feld('mindestens', h('input', { id: 'tmin-' + i, type: 'number', min: 0, value: t.min_anzahl, oninput: (e) => { t.min_anzahl = e.target.value; } })),
+        feld('höchstens', h('input', { id: 'tmax-' + i, type: 'number', min: 1, value: t.max_anzahl, oninput: (e) => { t.max_anzahl = e.target.value; } })),
+        h('button.btn.btn-klein.btn-gefahr', { type: 'button', onclick: () => { teile.splice(i, 1); c.neu(); } }, icon('muell', 14)))),
+      h('button.btn.btn-klein', { onclick: () => { teile.push({ geraetetyp_id: '', min_anzahl: 1, max_anzahl: 1, bemerkung: '' }); c.neu(); } }, icon('plus', 14), 'Teil hinzufügen'),
+      h('p.klein.gedimmt', { style: { marginTop: '12px' } }, 'Eine Spanne (1–2 Flaschen) heißt: Beides ist vollständig. Darunter ist der Satz unvollständig, darüber abweichend.'),
+    ],
+    sperre: (w) => (!String(w.name || '').trim() ? 'Name angeben' : null),
+    speichern: (w) => {
+      const r = Sync.tun('satzarten.speichern', {
+        id: neu ? undefined : a.id,
+        neu_id: neu ? neueId() : undefined,
+        name: w.name,
+        beschreibung: w.beschreibung,
+        teile: teile.filter((t) => t.geraetetyp_id).map((t) => ({ geraetetyp_id: t.geraetetyp_id, min_anzahl: Number(t.min_anzahl), max_anzahl: Number(t.max_anzahl), bemerkung: t.bemerkung })),
+      });
+      meldung.erfolg('Satzart gespeichert.');
+      return r;
+    },
+  });
+}
+
+function satzDialog(id, beimSchliessen) {
+  return dialog({
+    titel: 'Gerätesatz',
+    breite: 'breit',
+    lebendig: true,
+    beimSchliessen: beimSchliessen,
+    inhalt: (c) => {
+      const s = Z.idx.satz.get(id);
+      if (!s) return h('div.leer', 'Diesen Satz gibt es nicht (mehr).');
+      c.titel(s.name);
+      const art = s.satzart_id ? Z.idx.satzart.get(s.satzart_id) : null;
+      const teile = s.teile.map((gid) => Z.idx.geraet.get(gid)).filter(Boolean);
+      const technik = istTechnik();
+      const soll = art ? Z.daten.satzteile.filter((t) => t.satzart_id === art.id) : [];
+      return [
+        h('div.knopfreihe', { style: { marginBottom: '16px' } },
+          vollstBadge(s.vollstaendigkeit),
+          s.verteilt ? h('span.badge.badge-gelb', 'verteilt') : null,
+          h('span.mono.gedimmt', s.barcode || '')),
+        h('div.detail-raster',
+          h('div.detail-feld', h('span', 'Vorlage'), h('strong', art ? art.name : 'frei, ohne Vorlage')),
+          h('div.detail-feld', h('span', 'Standort'), h('strong', s.verteilt ? 'verteilt auf ' + new Set(teile.map((g) => g.lagerplatz_id)).size + ' Plätze' : s.standort_id ? ortZeile(s.standort_id) : '–')),
+          h('div.detail-feld', h('span', 'Teile'), h('strong', String(teile.length))),
+          s.bemerkung ? h('div.detail-feld', h('span', 'Bemerkung'), h('div', s.bemerkung)) : null),
+        h('div.knopfreihe', { style: { marginBottom: '8px' } },
+          teile.length ? h('button.btn.btn-klein.btn-primary', { onclick: () => umlagernDialog(teile.map((g) => g.id)) }, icon('umlagern', 14), 'Ganzen Satz umlagern') : null,
+          technik ? h('button.btn.btn-klein', { onclick: () => satzFormular(s) }, icon('stift', 14), 'Bearbeiten') : null,
+          h('button.btn.btn-klein', { onclick: () => etikettenFuer('saetze', [s.id]) }, icon('etikett', 14), 'Etikett'),
+          technik ? h('button.btn.btn-klein.btn-gefahr', {
+            onclick: async () => {
+              if (!(await bestaetigen({ titel: s.name + ' auflösen?', text: 'Der Satz wird gelöscht, seine Geräte bleiben und stehen danach einzeln.', ja: 'Auflösen', gefahr: true }))) return;
+              try {
+                Sync.tun('saetze.loeschen', { id: s.id });
+                meldung.erfolg('Satz aufgelöst.');
+                c.schliessen();
+              } catch (e) {
+                meldung.fehler(e);
+              }
+            },
+          }, icon('muell', 14), 'Auflösen') : null),
+        soll.length ? [
+          h('div.abschnitt-titel', 'Soll und Ist'),
+          h('div.karte', tabelle({
+            zustand: {},
+            schluessel: (t) => t.id,
+            zeilen: soll,
+            spalten: [
+              { id: 'typ', titel: 'Gerätetyp', zelle: (t) => h('strong', typName(t.geraetetyp_id)) },
+              { id: 'soll', titel: 'Soll', zelle: (t) => (t.min_anzahl === t.max_anzahl ? t.min_anzahl + '×' : t.min_anzahl + '–' + t.max_anzahl + '×') },
+              { id: 'ist', titel: 'Ist', zelle: (t) => {
+                const ist = teile.filter((g) => g.geraetetyp_id === t.geraetetyp_id && g.status !== 'ausgemustert').length;
+                const farbe = ist < t.min_anzahl ? 'badge-rot' : ist > t.max_anzahl ? 'badge-gelb' : 'badge-gruen';
+                return h('span.badge.' + farbe, ist + '×');
+              } },
+              { id: 'bem', titel: 'Hinweis', zelle: (t) => h('span.klein.gedimmt', t.bemerkung || '') },
+            ],
+          })),
+        ] : null,
+        h('div.abschnitt-titel', 'Teile'),
+        technik ? h('div', { style: { marginBottom: '12px' } }, geraeteSuche({
+          id: 'satz-suche',
+          platzhalter: 'Gerät hinzufügen: suchen oder Barcode scannen',
+          filter: (g) => g.satz_id !== s.id,
+          gewaehlt: (g) => {
+            try {
+              const r = Sync.tun('saetze.hinzufuegen', { satz: s.id, geraete: [g.id] });
+              meldung.erfolg(geraetTitel(g) + (r.vorschau.gewechselt ? ' aus einem anderen Satz übernommen.' : ' hinzugefügt.'));
+            } catch (e) {
+              meldung.fehler(e);
+            }
+          },
+        })) : null,
+        h('div.karte', tabelle({
+          zustand: ui('satz-teile'),
+          neu: () => c.neu(),
+          schluessel: (g) => g.id,
+          zeilen: teile,
+          leer: 'Der Satz ist leer.',
+          klick: (g) => akteDialog(g.id),
+          spalten: [
+            { id: 'geraet', titel: 'Gerät', wert: geraetTitel, zelle: (g) => [h('strong', geraetTitel(g)), h('div.klein.gedimmt', typName(g.geraetetyp_id) + ' · ' + g.barcode)] },
+            { id: 'ort', titel: 'Standort', wert: (g) => ortName(g.lagerplatz_id), zelle: (g) => ortZeile(g.lagerplatz_id) },
+            { id: 'status', titel: 'Status', wert: (g) => g.status, zelle: (g) => statusBadge(g.status) },
+            { id: 'abw', titel: 'Vorlage', zelle: (g) => (s.fremd.indexOf(g.id) >= 0 ? h('span.badge.badge-gelb', 'nicht in der Vorlage') : null) },
+          ],
+          aktion: technik ? (g) => h('button.btn.btn-klein', {
+            onclick: () => {
+              try {
+                Sync.tun('saetze.entfernen', { satz: s.id, geraete: [g.id] });
+                meldung.erfolg(geraetTitel(g) + ' aus dem Satz genommen.');
+              } catch (e) {
+                meldung.fehler(e);
+              }
+            },
+          }, 'Entfernen') : null,
+        })),
+      ];
+    },
+  });
+}
+
+// ─────────────────────────────── Mitglieder ───────────────────────────────
+
+/** Ein Vorschlag für das Kürzel: die Anfangsbuchstaben – „Anna Brandt“ wird „AB“. */
+function kuerzelVorschlag(name) {
+  return String(name || '').trim().split(/\s+/).filter(Boolean).map((t) => t[0]).join('').toUpperCase().slice(0, 4);
+}
+
+function mitgliedFormular(m) {
+  const neu = !m;
+  let kuerzelVonHand = !neu;
+  formular({
+    titel: neu ? 'Mitglied aufnehmen' : 'Mitglied bearbeiten',
+    werte: neu ? { name: '', email: '', kuerzel: '', rolle: 'mitglied' } : Object.assign({}, m),
+    inhalt: (w) => [
+      feld('Name', eingabe(w, 'name', {
+        placeholder: 'Vor- und Nachname',
+        oninput: (e) => {
+          w.name = e.target.value;
+          if (!kuerzelVonHand) {
+            w.kuerzel = kuerzelVorschlag(w.name);
+            const k = document.getElementById('f-kuerzel');
+            if (k) k.value = w.kuerzel;
+          }
+        },
+      })),
+      feld('Google-Adresse', eingabe(w, 'email', { type: 'email', placeholder: 'vorname.nachname@firma.de', autocapitalize: 'none', spellcheck: 'false' }),
+        'Das Firmenkonto, mit dem sich die Person anmeldet. Ein Kennwort gibt es nicht.'),
+      h('div.zeile',
+        feld('Kürzel', eingabe(w, 'kuerzel', {
+          placeholder: 'z. B. AB',
+          autocapitalize: 'characters',
+          style: { textTransform: 'uppercase' },
+          oninput: (e) => {
+            w.kuerzel = e.target.value;
+            kuerzelVonHand = true;
+          },
+        }), 'Zum Anmelden am Hallengerät, wenn der Ausweis nicht zur Hand ist.'),
+        feld('Rolle', auswahl(w, 'rolle', [
+          ['mitglied', 'Mitglied – lesen, umlagern, zählen'],
+          ['geraetewart', 'Gerätewart – dazu Stammdaten, Prüfungen und Atemschutz-Nachweise'],
+          ['kommandant', 'Kommandant – Personal und Nachweise; Technik nur lesen'],
+          ['admin', 'Administrator – alles, dazu Mitglieder und Einstellungen'],
+        ]))),
+      !neu ? haken(w, 'aktiv', 'Zugang aktiv – ein gesperrtes Mitglied ist sofort draußen, auch in der Halle') : null,
+    ],
+    sperre: (w) => (!String(w.name || '').trim() ? 'Name angeben' : !String(w.email || '').trim() ? 'Google-Adresse angeben' : null),
+    speichern: (w) => {
+      const r = Sync.tun('mitglieder.speichern', {
+        id: neu ? undefined : m.id,
+        neu_id: neu ? neueId() : undefined,
+        name: w.name,
+        email: w.email,
+        kuerzel: w.kuerzel,
+        rolle: w.rolle,
+        aktiv: neu ? undefined : !!w.aktiv,
+      });
+      meldung.erfolg(neu ? w.name + ' aufgenommen – die Anmeldung läuft über das Firmenkonto.' : 'Gespeichert.');
+      return r;
+    },
+  });
+}
+
+/** Die Ausweiskarte – einmal angezeigt, zum Ausdrucken. Danach kennt sie niemand mehr. */
+function ausweisDialog(r) {
+  const karte = h('div.ausweis-karte',
+    h('div.ausweis-kopf', h('strong', Z.daten.wehr.name || 'Feuerwehr'), h('span', 'Ausweis Fahrzeughalle')),
+    h('div.ausweis-qr', QR.svg(r.code)),
+    h('div', { style: { fontWeight: 700, fontSize: '15px' } }, r.name + (r.kuerzel ? ' · ' + r.kuerzel : '')),
+    h('div.ausweis-code', r.code),
+    h('div.ausweis-fuss', 'Gilt nur an angemeldeten Hallengeräten. Verloren? Sofort melden.'));
+  dialog({
+    titel: 'Ausweis für ' + r.name,
+    fest: true,
+    inhalt: () => [
+      h('div.hinweisbox', h('span', 'Der Code wird nur jetzt angezeigt. Gespeichert ist nur sein Abdruck – wer ihn verliert, bekommt einen neuen, und dieser hier gilt dann nicht mehr.')),
+      karte,
+    ],
+    fuss: (c) => [
+      h('button.btn', { onclick: () => drucken(karte) }, icon('drucken', 15), 'Drucken'),
+      h('button.btn.btn-primary', { onclick: () => c.schliessen() }, 'Fertig'),
+    ],
+  });
+}
+
+// ─────────────────────────────── Regeln ───────────────────────────────
+
+const AKTION_TEXT = { status_setzen: 'Status setzen', pruefung_faellig: 'Prüfung sofort fällig', notiz: 'Notiz anhängen' };
+
+function regelFormular(r) {
+  const neu = !r;
+  const aktionen = (r ? r.aktionen || [] : [{ art: 'status_setzen', status: 'zu_reinigen' }]).map((a) => Object.assign({}, a));
+  const b = Object.assign({ grund: '', zielTyp: '', ergebnis: '', geraetetyp: '' }, r ? r.bedingungen || {} : {});
+  formular({
+    titel: neu ? 'Neue Regel' : 'Regel bearbeiten',
+    breite: 'mittel',
+    werte: neu ? { name: '', beschreibung: '', ausloeser: 'umlagerung', aktiv: true, position: (Z.daten.regeln.length + 1) } : Object.assign({}, r),
+    inhalt: (w, c) => [
+      feld('Name', eingabe(w, 'name', { placeholder: 'z. B. Nach dem Einsatz prüfen' })),
+      feld('Beschreibung', eingabe(w, 'beschreibung', { placeholder: 'Wozu? – steht später in der Liste' })),
+      h('div.abschnitt-titel', 'Wenn …'),
+      h('div.zeile',
+        feld('Anlass', auswahl(w, 'ausloeser', [['umlagerung', 'ein Gerät umgelagert wird'], ['pruefung', 'eine Prüfung erfasst wird']], null, () => c.neu())),
+        feld('Gerätetyp', h('select', { id: 'rb-typ', onchange: (e) => { b.geraetetyp = e.target.value; } },
+          typOptionen('jeder Gerätetyp').map((o) => h('option', { value: o[0], selected: b.geraetetyp === o[0] }, o[1]))))),
+      w.ausloeser === 'umlagerung'
+        ? h('div.zeile',
+          feld('mit dem Grund', h('select', { id: 'rb-grund', onchange: (e) => { b.grund = e.target.value; } },
+            [['', 'jeder Grund']].concat(Z.daten.gruende.map((g) => [g.name, g.name])).map((o) => h('option', { value: o[0], selected: b.grund === o[0] }, o[1])))),
+          feld('an einen Platz vom Typ', h('select', { id: 'rb-ziel', onchange: (e) => { b.zielTyp = e.target.value; } },
+            [['', 'jeder Typ']].concat(Object.keys(ORT_TYP_TEXT).map((k) => [k, ORT_TYP_TEXT[k]])).map((o) => h('option', { value: o[0], selected: b.zielTyp === o[0] }, o[1])))))
+        : feld('mit dem Ergebnis', h('select', { id: 'rb-erg', onchange: (e) => { b.ergebnis = e.target.value; } },
+          [['', 'egal'], ['bestanden', 'bestanden'], ['nicht_bestanden', 'nicht bestanden']].map((o) => h('option', { value: o[0], selected: b.ergebnis === o[0] }, o[1])))),
+      h('div.abschnitt-titel', '… dann'),
+      aktionen.map((a, i) => h('div.zeile', { style: { alignItems: 'end' } },
+        feld('Aktion', h('select', { id: 'ra-' + i, onchange: (e) => { a.art = e.target.value; c.neu(); } },
+          Object.keys(AKTION_TEXT).map((k) => h('option', { value: k, selected: a.art === k }, AKTION_TEXT[k])))),
+        a.art === 'status_setzen' ? feld('Status', h('select', { id: 'ras-' + i, onchange: (e) => { a.status = e.target.value; } },
+          ALLE_STATUS.map((s) => h('option', { value: s, selected: a.status === s }, STATUS_TEXT[s])))) : null,
+        a.art === 'pruefung_faellig' ? feld('Welche', h('select', { id: 'rap-' + i, onchange: (e) => { a.plan = e.target.value || undefined; } },
+          [['', 'alle Prüfungen des Geräts']].concat(Z.daten.plaene.filter((p) => !p.geraet_id).map((p) => [p.id, typName(p.geraetetyp_id) + ': ' + p.name]))
+            .map((o) => h('option', { value: o[0], selected: (a.plan || '') === o[0] }, o[1])))) : null,
+        a.art === 'notiz' ? feld('Text', h('input', { id: 'rat-' + i, value: a.text || '', oninput: (e) => { a.text = e.target.value; } })) : null,
+        h('button.btn.btn-klein.btn-gefahr', { type: 'button', disabled: aktionen.length === 1, onclick: () => { aktionen.splice(i, 1); c.neu(); } }, icon('muell', 14)))),
+      h('button.btn.btn-klein', { onclick: () => { aktionen.push({ art: 'status_setzen', status: 'zu_reinigen' }); c.neu(); } }, icon('plus', 14), 'Weitere Aktion'),
+      h('div', { style: { height: '14px' } }),
+      haken(w, 'aktiv', 'Regel ist aktiv'),
+      h('p.klein.gedimmt', '„Defekt“ und „ausgemustert“ setzt eine Regel nie zurück – sie darf ein Gerät nicht stillschweigend gesundschreiben.'),
+    ],
+    sperre: (w) => (!String(w.name || '').trim() ? 'Name angeben' : null),
+    speichern: (w) => {
+      const erg = Sync.tun('regeln.speichern', {
+        id: neu ? undefined : r.id,
+        neu_id: neu ? neueId() : undefined,
+        name: w.name,
+        beschreibung: w.beschreibung,
+        ausloeser: w.ausloeser,
+        bedingungen: b,
+        aktionen: aktionen,
+        aktiv: !!w.aktiv,
+        position: w.position,
+      });
+      meldung.erfolg('Regel gespeichert.');
+      return erg;
+    },
+  });
+}
+
+function regelSatz(r) {
+  const b = r.bedingungen || {};
+  const wenn = [];
+  if (r.ausloeser === 'umlagerung') {
+    wenn.push('ein Gerät' + (b.geraetetyp ? ' vom Typ ' + typName(b.geraetetyp) : '') + ' umgelagert wird');
+    if (b.grund) wenn.push('mit dem Grund „' + b.grund + '“');
+    if (b.zielTyp) wenn.push('an einen Platz vom Typ ' + ORT_TYP_TEXT[b.zielTyp]);
+  } else {
+    wenn.push('eine Prüfung' + (b.geraetetyp ? ' an einem ' + typName(b.geraetetyp) : ''));
+    wenn.push(b.ergebnis ? (b.ergebnis === 'bestanden' ? 'bestanden' : 'nicht bestanden') + ' wird' : 'erfasst wird');
+  }
+  const dann = (r.aktionen || []).map((a) => {
+    if (a.art === 'status_setzen') return 'Status → ' + STATUS_TEXT[a.status];
+    if (a.art === 'pruefung_faellig') {
+      const p = a.plan ? Z.idx.plan.get(a.plan) : null;
+      return (p ? p.name : 'alle Prüfungen') + ' sofort fällig';
+    }
+    return 'Notiz „' + a.text + '“';
+  });
+  return [h('b', 'Wenn '), wenn.join(' '), h('b', ', dann '), dann.join(', ') + '.'];
+}
+
+// ─────────────────────────────── Hallengerät ───────────────────────────────
+
+/** Ein zufälliges Gerätegeheimnis, gewürfelt im Browser. */
+function geraeteGeheimnis() {
+  const zeichen = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  const bytes = new Uint8Array(40);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (b) => zeichen[b % 32]).join('');
+}
+
+function hallengeraetFelder(w, c) {
+  return [
+    feld('Name des Geräts', eingabe(w, 'name', { placeholder: 'z. B. Tablet Fahrzeughalle' })),
+    haken(w, 'geteilt', 'Geteiltes Gerät – meldet sich nach Untätigkeit selbst ab', () => c.neu()),
+    w.geteilt ? feld('Abmelden nach (Minuten)', eingabe(w, 'abmelden_nach_min', { type: 'number', min: 1, max: 120 }),
+      'Bleibt die Sitzung des vorigen Trupps stehen, bucht der nächste auf dessen Namen.') : null,
+    haken(w, 'kuerzel_erlaubt', 'Anmeldung mit Kürzel erlauben (sonst nur mit Ausweis)'),
+    h('p.klein.gedimmt', 'Der Ausweis ist ein Geheimnis, das Kürzel eine Selbstauskunft – wer es kennt, kann es tippen. Im Protokoll steht, womit sich jemand angemeldet hat.'),
+  ];
+}
+
+/**
+ * Das Gerät, an dem man gerade sitzt, zum Hallengerät machen. Danach zeigt es sofort die
+ * Anmeldung mit Ausweis oder Kürzel – das Firmenkonto dessen, der es eingerichtet hat,
+ * bleibt dahinter, sonst buchte jeder Trupp auf seinen Namen.
+ */
+function hallengeraetFormular() {
+  formular({
+    titel: 'Dieses Gerät als Hallengerät anmelden',
+    werte: { name: '', geteilt: true, abmelden_nach_min: 3, kuerzel_erlaubt: true },
+    inhalt: (w, c) => [
+      h('p', 'Danach meldet sich hier jedes Mitglied mit Ausweis oder Kürzel an. Ihr eigenes Konto ist auf diesem Gerät dann nicht mehr angemeldet.'),
+      hallengeraetFelder(w, c),
+    ],
+    sperre: (w) => (!String(w.name || '').trim() ? 'Namen vergeben' : null),
+    speichernText: 'Anmelden',
+    speichern: async (w) => {
+      const geheimnis = geraeteGeheimnis();
+      await api('hallengeraet.anmelden', { name: w.name, geteilt: !!w.geteilt, abmelden_nach_min: Number(w.abmelden_nach_min), kuerzel_erlaubt: !!w.kuerzel_erlaubt, geheimnis: geheimnis });
+      Ablage.schreiben('hallengeraet', geheimnis);
+      Ablage.schreiben('hallengeraet.name', w.name);
+      Ablage.schreiben('hallengeraet.kuerzel', !!w.kuerzel_erlaubt);
+      meldung.erfolg('„' + w.name + '“ ist jetzt Hallengerät.');
+      setTimeout(() => {
+        Z.daten = null;
+        zeichnen();
+      }, 50);
+    },
+  });
+}
+
+/**
+ * Ein anderes Gerät koppeln – das Tablet an der Wand, das mit einem Konto ohne
+ * Mitgliedschaft angemeldet ist und deshalb nie bis in die Einstellungen kommt.
+ */
+function kopplungFormular() {
+  formular({
+    titel: 'Hallengerät koppeln',
+    werte: { name: '', geteilt: true, abmelden_nach_min: 3, kuerzel_erlaubt: true },
+    inhalt: (w, c) => [
+      h('p', 'Erzeugt einen Code, mit dem sich ein anderes Gerät als Hallengerät einrichtet: dort die Web-App öffnen, „Dieses Gerät als Hallengerät einrichten …“, Code eintippen.'),
+      hallengeraetFelder(w, c),
+    ],
+    sperre: (w) => (!String(w.name || '').trim() ? 'Namen vergeben' : null),
+    speichernText: 'Code erzeugen',
+    speichern: async (w) => {
+      const r = await api('hallengeraet.kopplung', { name: w.name, geteilt: !!w.geteilt, abmelden_nach_min: Number(w.abmelden_nach_min), kuerzel_erlaubt: !!w.kuerzel_erlaubt });
+      setTimeout(() => dialog({
+        titel: 'Kopplungscode für „' + w.name + '“',
+        fest: true,
+        inhalt: () => [
+          h('div', { style: { fontFamily: 'var(--mono)', fontSize: '34px', fontWeight: 750, textAlign: 'center', padding: '20px', background: 'var(--n-50)', borderRadius: '12px', letterSpacing: '0.12em', userSelect: 'all' } }, r.code),
+          h('p', { style: { marginTop: '14px' } }, 'Auf dem Gerät in der Halle die Web-App öffnen. Dort steht „kein Zugang“ – darunter „Dieses Gerät als Hallengerät einrichten …“ wählen und den Code eintippen.'),
+          h('p.klein.gedimmt', 'Gilt bis ' + new Date(r.bis).toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' }) + ' Uhr und genau einmal. Danach erscheint das Gerät in der Liste.'),
+        ],
+        fuss: (d) => [h('button.btn.btn-primary', { onclick: () => d.schliessen() }, 'Fertig')],
+      }), 50);
+    },
+  });
+}
+
+// ─────────────────────────────── Etiketten-Kurzweg ───────────────────────────────
+
+function etikettenFuer(art, ids) {
+  const z = ui('etiketten', { art: 'geraete', gewaehlt: new Set(), groesse: 'mittel' });
+  z.art = art;
+  z.gewaehlt = new Set(ids);
+  DIALOGE.forEach((d) => d.schliessen());
+  gehe('/etiketten');
+}
+</script>

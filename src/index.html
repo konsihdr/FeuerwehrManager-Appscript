@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="de">
+  <head>
+    <base target="_top">
+    <meta charset="utf-8">
+    <?!= einbinden_('stil'); ?>
+  </head>
+  <body>
+    <div id="app"><div class="laden">Lädt …</div></div>
+    <div class="fortschritt" id="fortschritt"></div>
+    <div class="meldungen" id="meldungen" aria-live="polite"></div>
+    <script>
+      // Was der Server beim Ausliefern schon weiß: Name und Logo der Wehr, die Fassung.
+      // Der Anmeldebildschirm braucht dafür keinen eigenen Aufruf.
+      window.START = <?!= start ?>;
+    </script>
+    <script>
+      // Ableitungen und Prüfungen aus 05_Gemeinsam.js – dieselben Zeilen wie auf dem Server.
+      <?!= gemeinsam ?>
+    </script>
+    <?!= einbinden_('js_grund'); ?>
+    <?!= einbinden_('js_bausteine'); ?>
+    <?!= einbinden_('js_sync'); ?>
+    <?!= einbinden_('js_dialoge'); ?>
+    <?!= einbinden_('js_schreibtisch'); ?>
+    <?!= einbinden_('js_personal'); ?>
+    <?!= einbinden_('js_einsaetze'); ?>
+    <?!= einbinden_('js_halle'); ?>
+    <?!= einbinden_('js_start'); ?>
+  </body>
+</html>

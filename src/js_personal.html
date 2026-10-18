@@ -1,0 +1,432 @@
+<script>
+/**
+ * Personal: Atemschutz und Nachweise – die G26.3 der Mannschaft im Blick.
+ *
+ * Gerätewart, Kommandant und Administrator sehen und erfassen Nachweise; die Arten legt
+ * die Führung fest. Was „heute“ gilt – welcher Nachweis aktuell ist, wer
+ * atemschutztauglich ist, was demnächst abläuft –, rechnet `personalAbleiten_` aus
+ * `05_Gemeinsam.js`, auf dem Server wie hier. Diese Datei zeigt es nur an.
+ *
+ * Am Hallengerät gibt es nichts davon: Der Server schickt dorthin keine Personaldaten,
+ * auch nicht mit dem Kürzel des Gerätewarts.
+ */
+'use strict';
+
+const ATEMSCHUTZ_TEXT = { tauglich: 'tauglich', abgelaufen: 'abgelaufen', unvollstaendig: 'unvollständig', keiner: 'kein Träger' };
+const ATEMSCHUTZ_FARBE = { tauglich: 'badge-gruen', abgelaufen: 'badge-rot', unvollstaendig: 'badge-gelb', keiner: 'badge-grau' };
+/** Sortierfolge: was Arbeit macht, zuerst. */
+const ATEMSCHUTZ_FOLGE = ['abgelaufen', 'unvollstaendig', 'tauglich', 'keiner'];
+
+function atemschutzBadge(zustand) {
+  if (!zustand || zustand === 'keiner') return h('span.klein.gedimmt', 'kein Träger');
+  return h('span.badge.' + ATEMSCHUTZ_FARBE[zustand], ATEMSCHUTZ_TEXT[zustand]);
+}
+
+function gueltigText(art) {
+  if (!art || !art.gueltig_wert) return 'läuft nicht ab';
+  return art.gueltig_wert + ' ' + (EINHEIT_TEXT[art.gueltig_einheit] || art.gueltig_einheit);
+}
+
+/** „abgelaufen“, „noch 25 Tage“, „gültig“ – gemessen an der Vorwarnzeit für Nachweise. */
+function nachweisBadge(n) {
+  if (!n.gueltig_bis) return h('span.badge.badge-gruen', 'unbefristet');
+  const tage = tageBis(n.gueltig_bis);
+  const vorwarnung = Z.daten.personal ? Z.daten.personal.vorwarnung : 60;
+  if (tage < 0) return h('span.badge.badge-rot', 'abgelaufen');
+  if (tage <= vorwarnung) return h('span.badge.badge-gelb', tage === 0 ? 'läuft heute ab' : 'noch ' + plural(tage, 'Tag', 'Tage'));
+  return h('span.badge.badge-gruen', 'gültig');
+}
+
+function ablaufBadge(tage) {
+  if (tage < -1) return h('span.badge.badge-rot', -tage + ' Tage abgelaufen');
+  if (tage === -1) return h('span.badge.badge-rot', 'seit gestern abgelaufen');
+  if (tage === 0) return h('span.badge.badge-gelb', 'läuft heute ab');
+  return h('span.badge.badge-gelb', 'in ' + plural(tage, 'Tag', 'Tagen'));
+}
+
+function artenSortiert() {
+  return (Z.daten.qualiarten || []).slice().sort((a, b) => (a.position || 0) - (b.position || 0) || vergleich(a.name, b.name));
+}
+
+function artKurz(art) {
+  return String(art.name).split(' – ')[0];
+}
+
+/** Erfasste Nachweise und die aus den Einsatzberichten (`einsatzNachweise_`) zusammen. */
+function alleNachweise() {
+  return (Z.daten.nachweise || []).concat(Z.daten.personal ? Z.daten.personal.ausEinsatz || [] : []);
+}
+
+/** Je Mitglied der aktuelle Nachweis je Art – die ersetzten bleiben Beleg, zählen aber nicht. */
+function aktuelleNachweise() {
+  const aus = {};
+  const aktuell = Z.daten.personal ? Z.daten.personal.aktuell : {};
+  alleNachweise().forEach((n) => {
+    if (!aktuell[n.id]) return;
+    (aus[n.mitglied_id] = aus[n.mitglied_id] || {})[n.art_id] = n;
+  });
+  return aus;
+}
+
+function nachweisZelle(n) {
+  if (!n) return h('span.gedimmt.klein', 'fehlt');
+  return [nachweisBadge(n), h('div.klein.gedimmt', n.gueltig_bis ? 'bis ' + datum(n.gueltig_bis) : 'seit ' + datum(n.erworben_am))];
+}
+
+/** Woher ein abgeleiteter Nachweis kommt – mit dem Weg zum Bericht, wenn er im Stand ist. */
+function nachweisHerkunft(n) {
+  if (!n || !n.abgeleitet) return null;
+  const e = (Z.daten.einsaetze || []).find((x) => x.id === n.einsatz_id);
+  return h('div.klein.gedimmt', 'aus dem Bericht ', e
+    ? h('a', { href: '#/einsaetze/' + e.id, onclick: (ev) => { ev.preventDefault(); gehe('/einsaetze/' + e.id); } }, '„' + e.bezeichnung + '“')
+    : 'eines älteren Einsatzes');
+}
+
+// ─────────────────────────────── Übersicht ───────────────────────────────
+
+function seitePersonal(param) {
+  const z = ui('personal', { suche: '', zustand: '', gesperrte: false, sortiert: 'atemschutz' });
+  const p = Z.daten.personal;
+
+  // Die Personalakte folgt der Adresse – wie die Geräteakte.
+  if (param && Z.idx.mitglied.has(param)) {
+    if (!offenePersonalakte || offenePersonalakte.zu || offenePersonalakte.mitgliedId !== param) {
+      setTimeout(() => {
+        const d = personalakteDialog(param, () => {
+          if (Router.teile()[0] === 'personal' && Router.teile()[1] === param) gehe('/personal', true);
+        });
+        d.ausAdresse = true;
+      }, 0);
+    }
+  } else if (offenePersonalakte && !offenePersonalakte.zu && offenePersonalakte.ausAdresse) {
+    offenePersonalakte.schliessen();
+  }
+
+  const arten = artenSortiert().filter((a) => a.aktiv);
+  const atemschutz = arten.filter((a) => a.atemschutz);
+  const weitere = arten.filter((a) => !a.atemschutz);
+  const aktuell = aktuelleNachweise();
+  const t = norm(z.suche);
+  const liste = Z.daten.mitglieder.filter((m) => (z.gesperrte || m.aktiv) &&
+    (!z.zustand || p.atemschutz[m.id] === z.zustand) && (!t || norm(m.name).indexOf(t) >= 0));
+  const unvollstaendig = Z.daten.mitglieder.filter((m) => m.aktiv && p.atemschutz[m.id] === 'unvollstaendig').length;
+  const zeigen = (zustand) => () => {
+    z.zustand = zustand;
+    zeichnen();
+  };
+  const kachel = (wert, titel, art, klick) => h('button.kachel', { class: art || '', onclick: klick },
+    h('div.kachel-wert', String(wert)), h('div.kachel-titel', titel));
+
+  return [
+    werkzeugleiste('Atemschutz & Nachweise', 'G26.3, Lehrgang, Belastungsübung: wer heute unter Atemschutz darf – und was demnächst abläuft.', [
+      h('button.btn', { onclick: (e) => { e.currentTarget.disabled = true; pdfHolen('personal.pdf', {}).catch(meldung.fehler.bind(meldung)).then(() => zeichnen()); } }, icon('drucken', 16), 'Atemschutzliste (PDF)'),
+      knopf('Nachweis erfassen', 'plus', () => nachweisFormular(null, {}), 'btn-primary'),
+    ]),
+    h('div.kacheln',
+      kachel(p.tauglich + ' / ' + p.traeger, 'Atemschutztauglich', p.tauglich < p.traeger ? 'hinweis' : 'gut', zeigen('tauglich')),
+      kachel(Z.daten.mitglieder.filter((m) => m.aktiv && p.atemschutz[m.id] === 'abgelaufen').length, 'Nicht tauglich: abgelaufen', p.abgelaufen ? 'warnung' : '', zeigen('abgelaufen')),
+      kachel(unvollstaendig, 'Nicht tauglich: unvollständig', unvollstaendig ? 'hinweis' : '', zeigen('unvollstaendig')),
+      kachel(p.bald, 'Läuft in ' + p.vorwarnung + ' Tagen ab', p.bald ? 'hinweis' : '', () => gehe('/'))),
+    atemschutz.length ? null : h('div.hinweisbox', h('span', 'Keine Qualifikation ist als „Voraussetzung für Atemschutz“ markiert – dann ist niemand tauglich.'),
+      istFuehrung() ? h('button.btn.btn-klein', { onclick: () => gehe('/qualifikationen') }, 'Qualifikationsarten') : null),
+    h('div.karte',
+      h('div.filterleiste',
+        h('input.suche', { id: 'pers-suche', placeholder: 'Name suchen …', value: z.suche, oninput: (e) => { z.suche = e.target.value; zeichnen(); } }),
+        h('select', { id: 'pers-zustand', onchange: (e) => { z.zustand = e.target.value; zeichnen(); } },
+          [['', 'Jeder Atemschutz-Stand']].concat(ATEMSCHUTZ_FOLGE.map((k) => [k, ATEMSCHUTZ_TEXT[k]]))
+            .map((o) => h('option', { value: o[0], selected: z.zustand === o[0] }, o[1]))),
+        h('label.haken', h('input', { type: 'checkbox', id: 'pers-gesperrte', checked: z.gesperrte, onchange: (e) => { z.gesperrte = e.target.checked; zeichnen(); } }), h('span', 'Gesperrte zeigen')),
+        z.suche || z.zustand ? h('button.btn.btn-klein.btn-text', { onclick: () => { z.suche = ''; z.zustand = ''; zeichnen(); } }, 'Filter zurücksetzen') : null),
+      tabelle({
+        zustand: z,
+        schluessel: (m) => m.id,
+        zeilen: liste,
+        klick: (m) => gehe('/personal/' + m.id, true),
+        leer: 'Niemand passt zu diesem Filter.',
+        spalten: [
+          { id: 'name', titel: 'Name', wert: (m) => m.name, zelle: (m) => [h('strong', { style: { whiteSpace: 'nowrap' } }, m.name), h('div.klein.gedimmt', (ROLLE_TEXT[m.rolle] || m.rolle) + (m.aktiv ? '' : ' · gesperrt'))] },
+          // Innerhalb desselben Stands alphabetisch: „0 Tom Leiter“ vor „2 Max Brenner“.
+          { id: 'atemschutz', titel: 'Atemschutz', wert: (m) => ATEMSCHUTZ_FOLGE.indexOf(p.atemschutz[m.id]) + ' ' + m.name, zelle: (m) => atemschutzBadge(p.atemschutz[m.id]) },
+        ].concat(atemschutz.map((a) => ({
+          id: 'art-' + a.id,
+          titel: artKurz(a),
+          wert: (m) => ((aktuell[m.id] || {})[a.id] || {}).gueltig_bis || '',
+          zelle: (m) => nachweisZelle((aktuell[m.id] || {})[a.id]),
+        })), weitere.length ? [{
+          id: 'weitere',
+          titel: 'Weitere',
+          zelle: (m) => h('span.klein', weitere.filter((a) => (aktuell[m.id] || {})[a.id]).map(artKurz).join(', ') || '–'),
+        }] : []),
+        aktion: (m) => h('button.btn.btn-klein', { onclick: () => nachweisFormular(null, { mitglied_id: m.id }) }, icon('plus', 14), 'Nachweis'),
+      })),
+    h('p.klein.gedimmt', { style: { marginTop: '14px' } }, 'Tauglich ist, wer für jede Qualifikation mit „Voraussetzung für Atemschutz“ einen gültigen Nachweis hat. Maßgeblich ist das Datum auf der Bescheinigung.'),
+  ];
+}
+
+// ─────────────────────────────── Personalakte ───────────────────────────────
+
+let offenePersonalakte = null;
+
+function personalakteDialog(id, beimSchliessen) {
+  if (offenePersonalakte && !offenePersonalakte.zu) {
+    if (offenePersonalakte.mitgliedId === id) return offenePersonalakte;
+    offenePersonalakte.schliessen();
+  }
+  const z = { verlauf: false };
+  const ctrl = dialog({
+    titel: 'Personalakte',
+    breite: 'breit',
+    lebendig: true,
+    beimSchliessen: beimSchliessen,
+    inhalt: (c) => personalakteInhalt(id, z, c),
+  });
+  ctrl.mitgliedId = id;
+  offenePersonalakte = ctrl;
+  return ctrl;
+}
+
+function personalakteInhalt(id, z, c) {
+  const m = Z.idx.mitglied.get(id);
+  if (!m || !Z.daten.nachweise) return h('div.leer', 'Diese Person gibt es nicht (mehr).');
+  c.titel(m.name);
+  const p = Z.daten.personal;
+  const eigene = alleNachweise().filter((n) => n.mitglied_id === id);
+  const aktuell = {};
+  eigene.forEach((n) => {
+    if (p.aktuell[n.id]) aktuell[n.art_id] = n;
+  });
+  const arten = artenSortiert().filter((a) => a.aktiv || aktuell[a.id]);
+  const zeilen = arten.map((a) => ({ art: a, n: aktuell[a.id] || null }));
+  const ersetzt = eigene.filter((n) => !p.aktuell[n.id]).sort((a, b) => vergleich(b.erworben_am, a.erworben_am));
+  const fehlt = arten.filter((a) => a.atemschutz && a.aktiv && !aktuell[a.id]);
+  const abgelaufen = arten.filter((a) => a.atemschutz && aktuell[a.id] && aktuell[a.id].gueltig_bis && aktuell[a.id].gueltig_bis < heute());
+  const zustand = p.atemschutz[id];
+  const artName = (aid) => (Z.idx.qualiart.get(aid) || {}).name || '–';
+
+  return [
+    h('div.knopfreihe', { style: { marginBottom: '16px' } },
+      atemschutzBadge(zustand),
+      h('span.badge.' + (ROLLE_FARBE[m.rolle] || 'badge-grau'), ROLLE_TEXT[m.rolle] || m.rolle),
+      m.aktiv ? null : h('span.badge.badge-grau', 'gesperrt')),
+    zustand === 'abgelaufen' || zustand === 'unvollstaendig' ? h('div.hinweisbox', h('span',
+      'Nicht atemschutztauglich: ' + [
+        abgelaufen.length ? abgelaufen.map(artKurz).join(', ') + ' abgelaufen' : '',
+        fehlt.length ? fehlt.map(artKurz).join(', ') + ' fehlt' : '',
+      ].filter(Boolean).join('; ') + '.')) : null,
+    h('div.knopfreihe', { style: { marginBottom: '8px' } },
+      h('button.btn.btn-klein.btn-primary', { onclick: () => nachweisFormular(null, { mitglied_id: id }) }, icon('plus', 14), 'Nachweis erfassen')),
+    h('div.abschnitt-titel', 'Aktueller Stand'),
+    h('div.karte', tabelle({
+      zustand: {},
+      neu: () => c.neu(),
+      schluessel: (x) => x.art.id,
+      zeilen: zeilen,
+      leer: 'Noch keine Qualifikationsarten angelegt.',
+      spalten: [
+        { id: 'art', titel: 'Qualifikation', zelle: (x) => [h('strong', x.art.name),
+          x.art.atemschutz ? h('div.klein.gedimmt', 'Voraussetzung für Atemschutz') : null,
+          x.art.aktiv ? null : h('span.badge.badge-grau', 'stillgelegt')] },
+        { id: 'erworben', titel: 'Erworben', zelle: (x) => (x.n ? [datum(x.n.erworben_am), nachweisHerkunft(x.n)] : h('span.gedimmt', '–')) },
+        { id: 'bis', titel: 'Gültig bis', zelle: (x) => (x.n ? (x.n.gueltig_bis ? datum(x.n.gueltig_bis) : 'unbefristet') : h('span.gedimmt', '–')) },
+        { id: 'stand', titel: 'Stand', zelle: (x) => (x.n ? nachweisBadge(x.n) : h('span.badge.badge-grau', 'fehlt')) },
+      ],
+      aktion: (x) => (x.n ? [
+        h('button.btn.btn-klein', { title: 'Neuen Nachweis erfassen – der bisherige bleibt als Beleg', onclick: () => nachweisFormular(null, { mitglied_id: id, art_id: x.art.id }) }, 'Erneuern'),
+        // Abgeleitetes berichtigt man im Bericht, nicht hier.
+        x.n.abgeleitet ? null : h('button.btn.btn-klein', { title: 'Einen Tippfehler berichtigen', onclick: () => nachweisFormular(x.n) }, 'Berichtigen'),
+      ] : x.art.aktiv ? h('button.btn.btn-klein', { onclick: () => nachweisFormular(null, { mitglied_id: id, art_id: x.art.id }) }, 'Erfassen') : null),
+    })),
+    ersetzt.length ? [
+      h('div', { style: { marginTop: '12px' } },
+        h('button.btn.btn-klein.btn-text', { onclick: () => { z.verlauf = !z.verlauf; c.neu(); } },
+          (z.verlauf ? 'Verlauf ausblenden' : 'Verlauf zeigen') + ' (' + plural(ersetzt.length, 'ersetzter Nachweis', 'ersetzte Nachweise') + ')')),
+      z.verlauf ? h('div.karte', tabelle({
+        zustand: {},
+        neu: () => c.neu(),
+        schluessel: (n) => n.id,
+        zeilen: ersetzt,
+        spalten: [
+          { id: 'art', titel: 'Qualifikation', zelle: (n) => h('strong', artName(n.art_id)) },
+          { id: 'erworben', titel: 'Erworben', zelle: (n) => datum(n.erworben_am) },
+          { id: 'bis', titel: 'Gültig bis', zelle: (n) => (n.gueltig_bis ? datum(n.gueltig_bis) : 'unbefristet') },
+          { id: 'stand', titel: 'Stand', zelle: () => h('span.badge.badge-grau', 'ersetzt') },
+          { id: 'von', titel: 'Erfasst von', zelle: (n) => h('span.klein', n.erfasst_von || '–') },
+        ],
+        aktion: (n) => (n.abgeleitet ? null : h('button.btn.btn-klein', { onclick: () => nachweisFormular(n) }, 'Berichtigen')),
+      })) : null,
+    ] : null,
+    h('p.klein.gedimmt', { style: { marginTop: '14px' } }, 'Erneuert wird mit einem neuen Nachweis – der alte bleibt als Beleg stehen und zählt nicht mehr. „Berichtigen“ ist für Tippfehler.' +
+      (arten.some((a) => a.aus_einsatz) ? ' Nachweise „aus dem Bericht“ folgen aus den Einsätzen unter Atemschutz.' : '')),
+    personalakteEinsaetze(id),
+  ];
+}
+
+// ─────────────────────────────── Nachweis ───────────────────────────────
+
+/**
+ * Einen Nachweis erfassen oder berichtigen. „Gültig bis“ schlägt die Art vor
+ * (`nachweisBis_`, dieselbe Rechnung wie auf dem Server) – bis jemand es von Hand ändert.
+ */
+function nachweisFormular(n, vorgabe) {
+  const neu = !n;
+  const start = neu
+    ? Object.assign({ mitglied_id: '', art_id: '', erworben_am: heute(), gueltig_bis: '', bemerkung: '' }, vorgabe || {})
+    : Object.assign({}, n, { gueltig_bis: n.gueltig_bis || '', bemerkung: n.bemerkung || '' });
+  let bisVonHand = !neu;
+  const vorschlag = (w) => nachweisBis_(Z.idx.qualiart.get(w.art_id), w.erworben_am);
+  if (neu && start.art_id) start.gueltig_bis = vorschlag(start);
+  const bisNachziehen = (w) => {
+    if (bisVonHand) return;
+    w.gueltig_bis = vorschlag(w);
+    const el = document.getElementById('f-gueltig_bis');
+    if (el) el.value = w.gueltig_bis;
+  };
+  formular({
+    titel: neu ? 'Nachweis erfassen' : 'Nachweis berichtigen',
+    werte: start,
+    inhalt: (w, c) => {
+      const art = Z.idx.qualiart.get(w.art_id);
+      const arten = artenSortiert().filter((a) => a.aktiv || a.id === w.art_id);
+      const bisher = neu && w.mitglied_id && w.art_id ? (aktuelleNachweise()[w.mitglied_id] || {})[w.art_id] : null;
+      return [
+        feld('Mitglied', auswahl(w, 'mitglied_id', [['', '– Mitglied wählen –']].concat(
+          sortiertNachName(Z.daten.mitglieder.filter((m) => m.aktiv || m.id === w.mitglied_id)).map((m) => [m.id, m.name])), null, () => c.neu())),
+        feld('Qualifikation', auswahl(w, 'art_id', [['', '– Qualifikation wählen –']].concat(arten.map((a) => [a.id, a.name])), null, () => {
+          bisNachziehen(w);
+          c.neu();
+        }), art && art.beschreibung ? art.beschreibung : null),
+        h('div.zeile',
+          feld('Erworben am', eingabe(w, 'erworben_am', { type: 'date', max: heute(), oninput: (e) => { w.erworben_am = e.target.value; bisNachziehen(w); } })),
+          feld('Gültig bis', eingabe(w, 'gueltig_bis', { type: 'date', oninput: (e) => { w.gueltig_bis = e.target.value; bisVonHand = true; } }),
+            art ? (art.gueltig_wert ? 'Vorschlag: ' + gueltigText(art) + ' nach Erwerb. Es gilt das Datum auf der Bescheinigung.' : 'Läuft nicht ab – leer lassen.') : null)),
+        feld('Bemerkung', eingabe(w, 'bemerkung', { placeholder: 'optional, z. B. Arzt oder Lehrgangsnummer' })),
+        bisher ? h('div.infobox', h('span', 'Der bisherige Nachweis (' + (bisher.gueltig_bis ? 'bis ' + datum(bisher.gueltig_bis) : 'unbefristet') +
+          ')' + (bisher.abgeleitet ? ' kommt aus einem Einsatzbericht und' : '') + ' bleibt als Beleg stehen. Ab jetzt zählt der neue.')) : null,
+        art && art.aus_einsatz ? h('p.klein.gedimmt', 'Ergibt sich auch aus den Einsatzberichten – hier nur eintragen, was anderswo erbracht wurde.') : null,
+      ];
+    },
+    sperre: (w) => (!w.mitglied_id ? 'Mitglied wählen' : !w.art_id ? 'Qualifikation wählen' : !w.erworben_am ? 'Erwerbsdatum angeben' : null),
+    links: neu ? null : (w, c) => h('button.btn.btn-text', {
+      onclick: async () => {
+        if (!(await bestaetigen({ titel: 'Nachweis löschen?', text: 'Nur für Fehleingaben. Ein abgelaufener Nachweis bleibt besser als Beleg stehen – erneuert wird mit einem neuen.', ja: 'Löschen', gefahr: true }))) return;
+        if (sofort('nachweise.loeschen', { id: n.id }, 'Nachweis gelöscht.')) c.schliessen();
+      },
+    }, 'Löschen'),
+    speichern: (w) => {
+      const r = Sync.tun('nachweise.speichern', {
+        id: neu ? undefined : n.id,
+        neu_id: neu ? neueId() : undefined,
+        mitglied_id: w.mitglied_id,
+        art_id: w.art_id,
+        erworben_am: w.erworben_am,
+        gueltig_bis: w.gueltig_bis || '',
+        bemerkung: w.bemerkung,
+      });
+      const m = Z.idx.mitglied.get(w.mitglied_id);
+      const a = Z.idx.qualiart.get(w.art_id);
+      meldung.erfolg((a ? artKurz(a) : 'Nachweis') + (m ? ' für ' + m.name : '') + ' gespeichert.');
+      return r;
+    },
+  });
+}
+
+/** Für die Aktionsliste: was abläuft oder abgelaufen ist – nur die aktuellen Nachweise. */
+function nachweiseKarte(p) {
+  if (!p.faellig.length) return null;
+  const artName = (id) => (Z.idx.qualiart.get(id) || {}).name || '–';
+  const name = (id) => (Z.idx.mitglied.get(id) || {}).name || '–';
+  return h('div.karte',
+    h('div.karte-kopf',
+      h('h2', 'Nachweise ', h('span.klein.gedimmt', { style: { fontWeight: 400 } },
+        '(' + [p.abgelaufen ? p.abgelaufen + ' abgelaufen' : '', p.bald ? p.bald + ' laufen in ' + p.vorwarnung + ' Tagen ab' : ''].filter(Boolean).join(', ') + ')')),
+      h('button.btn.btn-klein', { onclick: () => gehe('/personal') }, 'Atemschutz & Nachweise')),
+    tabelle({
+      zustand: ui('aktionsliste-nachweise', { sortiert: 'bis' }),
+      schluessel: (f) => f.id,
+      zeilen: p.faellig,
+      klick: (f) => personalakteDialog(f.mitglied_id),
+      spalten: [
+        { id: 'bis', titel: 'Gültig bis', wert: (f) => f.tage, zelle: (f) => [ablaufBadge(f.tage), h('div.klein.gedimmt', datum(f.gueltig_bis))] },
+        { id: 'art', titel: 'Nachweis', wert: (f) => artName(f.art_id), zelle: (f) => h('strong', artName(f.art_id)) },
+        { id: 'wer', titel: 'Mitglied', wert: (f) => name(f.mitglied_id), zelle: (f) => name(f.mitglied_id) },
+      ],
+      aktion: (f) => h('button.btn.btn-klein.btn-primary', { onclick: () => nachweisFormular(null, { mitglied_id: f.mitglied_id, art_id: f.art_id }) }, 'Neuer Nachweis'),
+    }));
+}
+
+// ─────────────────────────────── Qualifikationsarten ───────────────────────────────
+
+function seiteQualifikationen() {
+  const fuehrung = istFuehrung();
+  const arten = artenSortiert();
+  const aktuell = Z.daten.personal.aktuell;
+  const anzahl = (a) => alleNachweise().filter((n) => n.art_id === a.id && aktuell[n.id]).length;
+  return [
+    werkzeugleiste('Qualifikationsarten', '„G26.3 gilt 36 Monate“ – eine Aussage über die Art, nicht über eine Person. Was als Voraussetzung für Atemschutz markiert ist, entscheidet über „tauglich“.', [
+      fuehrung ? knopf('Neue Qualifikation', 'plus', () => qualiartFormular(null), 'btn-primary') : null,
+    ]),
+    h('div.karte', tabelle({
+      zustand: {},
+      schluessel: (a) => a.id,
+      zeilen: arten,
+      leer: 'Noch keine Qualifikationen.',
+      spalten: [
+        { id: 'name', titel: 'Qualifikation', zelle: (a) => [h('strong', a.name), a.beschreibung ? h('div.klein.gedimmt', a.beschreibung) : null] },
+        { id: 'gilt', titel: 'Gültigkeit', zelle: (a) => gueltigText(a) },
+        { id: 'atem', titel: 'Atemschutz', zelle: (a) => (a.atemschutz || a.aus_einsatz ? [a.atemschutz ? h('span.badge.badge-blau', 'Voraussetzung') : null,
+          a.aus_einsatz ? h('span.badge.badge-grau', 'aus Einsätzen') : null] : h('span.gedimmt.klein', '–')) },
+        { id: 'anzahl', titel: 'Aktuelle Nachweise', klasse: 'rechts', zelle: (a) => String(anzahl(a)) },
+        { id: 'aktiv', titel: 'Zustand', zelle: (a) => (a.aktiv ? h('span.badge.badge-gruen', 'aktiv') : h('span.badge.badge-grau', 'stillgelegt')) },
+      ],
+      aktion: fuehrung ? (a) => [
+        h('button.btn.btn-klein', { onclick: () => qualiartFormular(a) }, 'Bearbeiten'),
+        h('button.btn.btn-klein', { onclick: () => sofort('qualiarten.speichern', { id: a.id, aktiv: !a.aktiv }, a.aktiv ? '„' + a.name + '“ stillgelegt.' : '„' + a.name + '“ ist wieder wählbar.') }, a.aktiv ? 'Stilllegen' : 'Aktivieren'),
+        h('button.btn.btn-klein.btn-gefahr', {
+          onclick: async () => {
+            if (!(await bestaetigen({ titel: '„' + a.name + '“ löschen?', text: 'Geht nur, solange niemand einen Nachweis dieser Art hat. Sonst stilllegen – die Nachweise bleiben dann als Beleg.', ja: 'Löschen', gefahr: true }))) return;
+            sofort('qualiarten.loeschen', { id: a.id }, 'Gelöscht.');
+          },
+        }, icon('muell', 14)),
+      ] : null,
+    })),
+    fuehrung ? null : h('p.klein.gedimmt', { style: { marginTop: '14px' } }, 'Qualifikationsarten legen Kommandant und Administrator fest.'),
+  ];
+}
+
+function qualiartFormular(a) {
+  const neu = !a;
+  formular({
+    titel: neu ? 'Neue Qualifikation' : 'Qualifikation bearbeiten',
+    werte: neu
+      ? { name: '', beschreibung: '', gueltig_wert: '', gueltig_einheit: '', atemschutz: false, aus_einsatz: false, aktiv: true }
+      : Object.assign({}, a, { gueltig_wert: a.gueltig_wert || '', gueltig_einheit: a.gueltig_einheit || '', aus_einsatz: !!a.aus_einsatz }),
+    inhalt: (w) => [
+      feld('Name', eingabe(w, 'name', { placeholder: 'z. B. G26.3 – Atemschutztauglichkeit' })),
+      feld('Beschreibung', eingabe(w, 'beschreibung', { placeholder: 'Steht beim Erfassen als Hinweis da' })),
+      h('div.zeile',
+        feld('Gilt', eingabe(w, 'gueltig_wert', { type: 'number', min: 1, placeholder: 'leer = läuft nicht ab' })),
+        feld('Einheit', auswahl(w, 'gueltig_einheit', [['', '–']].concat(Object.keys(EINHEIT_TEXT).map((k) => [k, EINHEIT_TEXT[k]]))))),
+      haken(w, 'atemschutz', 'Voraussetzung für Atemschutz – wer sie nicht gültig hat, ist nicht tauglich'),
+      haken(w, 'aus_einsatz', 'Erbracht durch einen Einsatz oder eine Übung unter Atemschutz – folgt aus den Einsatzberichten, niemand muss sie eintragen'),
+      neu ? null : haken(w, 'aktiv', 'Aktiv – beim Erfassen wählbar'),
+      h('p.klein.gedimmt', 'Eine geänderte Gültigkeit gilt für Nachweise, die danach erfasst werden. Bestehende behalten ihr Datum – maßgeblich ist, was auf der Bescheinigung steht.'),
+    ],
+    sperre: (w) => (!String(w.name || '').trim() ? 'Name angeben' : null),
+    speichern: (w) => {
+      const r = Sync.tun('qualiarten.speichern', {
+        id: neu ? undefined : a.id,
+        neu_id: neu ? neueId() : undefined,
+        name: w.name,
+        beschreibung: w.beschreibung,
+        gueltig_wert: w.gueltig_wert === '' ? null : Number(w.gueltig_wert),
+        gueltig_einheit: w.gueltig_einheit || null,
+        atemschutz: !!w.atemschutz,
+        aus_einsatz: !!w.aus_einsatz,
+        aktiv: neu ? true : !!w.aktiv,
+      });
+      meldung.erfolg(neu ? 'Qualifikation angelegt.' : 'Gespeichert.');
+      return r;
+    },
+  });
+}
+</script>

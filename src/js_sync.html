@@ -1,0 +1,1079 @@
+<script>
+/**
+ * Speichern im Hintergrund: Was man tut, steht sofort da – die Tabelle holt nach.
+ *
+ * ## Warum
+ *
+ * Ein Aufruf an Apps Script dauert eine bis drei Sekunden, ein schreibender unter der
+ * Sperre auch einmal mehr. Bis 0.1 wartete jeder Klick darauf: Dialog mit „Speichert …“,
+ * am Telefon in der Halle ein Knopf, der sich nicht rührt. Seit 0.2 gilt: **Die
+ * Oberfläche wartet nicht auf die Tabelle.**
+ *
+ * ## Wie
+ *
+ *   1. `Sync.tun(aktion, argumente)` wendet die Änderung auf eine Kopie des angezeigten
+ *      Stands an (`ANWENDEN`), rechnet das Abgeleitete neu (`ableiten_` – dieselbe
+ *      Funktion wie auf dem Server) und zeigt das Ergebnis sofort. Wirft das, war die
+ *      Eingabe unzulässig – dann geht gar nichts an den Server, und der Dialog sagt es.
+ *   2. Die Änderung kommt in die **Warteschlange** – auch in `localStorage`, damit ein
+ *      geschlossenes Fenster oder ein Funkloch in der Halle sie nicht kostet.
+ *   3. Kurz danach geht die Schlange als **Stapel** an den Server (`aufruf(…, 'stapel')`).
+ *      Jede Änderung trägt eine Kennung; schickt der Browser nach einer abgerissenen
+ *      Antwort denselben Stapel noch einmal, wird nichts doppelt gebucht.
+ *   4. Die Antwort bringt den Stand des Servers mit. Er wird die neue **Basis**, und was
+ *      noch in der Schlange steht, wird darauf neu angewandt. Lehnt der Server eine
+ *      Änderung ab, fällt sie aus der Schlange – und damit aus der Anzeige. Rückgängig
+ *      machen muss niemand etwas: Angezeigt wird immer Basis + Schlange.
+ *
+ * Was andere ändern, holt die Abfrage alle 15 Sekunden (`nachfragen`): ein Fingerabdruck
+ * aus dem Zwischenspeicher, und nur wenn er sich geändert hat, der ganze Stand.
+ *
+ * ## Was nicht hier durchgeht
+ *
+ * Alles, dessen Ergebnis man sehen muss, bevor es weitergeht: Ausweis ausgeben (der Code
+ * steht nur in der Antwort), Kopplungscode, Anmeldung, PDF, Import, Gerät löschen (ob
+ * es eine Geschichte hat, weiß nur der Server). Diese Aufrufe gehen weiter über `api()`
+ * und warten vorher, bis die Schlange leer ist – sonst käme der Ausweis vor dem Mitglied an.
+ *
+ * ## Wem eine Änderung gehört
+ *
+ * Am Schreibtisch ist es das Google-Konto: Eine Änderung aus der Schlange wird nur
+ * geschickt, wenn derselbe Mensch angemeldet ist, der sie gemacht hat. Am Hallengerät
+ * trägt jede Änderung das Token der Sitzung, in der sie entstand – meldet sich der
+ * nächste Trupp an, solange noch etwas offen ist, geht es trotzdem unter dem Namen
+ * dessen hinaus, der gebucht hat.
+ */
+'use strict';
+
+const SYNC_VERZOEGERUNG = 250; // ms – damit zehn Scans in Folge ein Stapel werden
+const SYNC_TAKT = 15000; // ms zwischen zwei Abfragen nach Änderungen anderer
+const SYNC_STAPEL = 25;
+const SYNC_HALTBAR = 7 * 24 * 3600 * 1000;
+
+/** Eine UUID (Version 4) – im Browser vergeben, auf dem Server übernommen (`neueId_`). */
+function neueId() {
+  const b = new Uint8Array(16);
+  crypto.getRandomValues(b);
+  b[6] = (b[6] & 0x0f) | 0x40;
+  b[8] = (b[8] & 0x3f) | 0x80;
+  const x = Array.from(b, (n) => n.toString(16).padStart(2, '0')).join('');
+  return x.slice(0, 8) + '-' + x.slice(8, 12) + '-' + x.slice(12, 16) + '-' + x.slice(16, 20) + '-' + x.slice(20);
+}
+
+function kopie(x) {
+  return typeof structuredClone === 'function' ? structuredClone(x) : JSON.parse(JSON.stringify(x));
+}
+
+function jetztIso() {
+  return new Date().toISOString();
+}
+
+/** Für Meldungen: Was war das, was nicht gespeichert werden konnte? */
+const OP_TEXT = {
+  'betrieb.umlagern': 'Umlagern',
+  'betrieb.gereinigt': 'Gereinigt',
+  'betrieb.statusSetzen': 'Status',
+  'pruefungen.erfassen': 'Prüfung',
+  'faelligkeit.aendern': 'Fälligkeit',
+  'lagerplaetze.speichern': 'Lagerplatz',
+  'lagerplaetze.loeschen': 'Lagerplatz löschen',
+  'typen.speichern': 'Gerätetyp',
+  'typen.loeschen': 'Gerätetyp löschen',
+  'plaene.speichern': 'Prüfplan',
+  'plaene.loeschen': 'Prüfplan löschen',
+  'schritte.speichern': 'Prüfschritte',
+  'geraete.speichern': 'Gerät',
+  'gruende.speichern': 'Umlagerungsgrund',
+  'gruende.verschieben': 'Reihenfolge der Gründe',
+  'gruende.loeschen': 'Grund löschen',
+  'einstellungen.speichern': 'Einstellungen',
+  'einstellungen.logo': 'Logo',
+  'satzarten.speichern': 'Satzart',
+  'satzarten.loeschen': 'Satzart löschen',
+  'saetze.speichern': 'Gerätesatz',
+  'saetze.loeschen': 'Satz auflösen',
+  'saetze.hinzufuegen': 'In den Satz',
+  'saetze.entfernen': 'Aus dem Satz',
+  'regeln.speichern': 'Regel',
+  'regeln.loeschen': 'Regel löschen',
+  'mitglieder.speichern': 'Mitglied',
+  'mitglieder.loeschen': 'Mitglied entfernen',
+  'ausweis.zurueckziehen': 'Ausweis zurückziehen',
+  'hallengeraet.aendern': 'Hallengerät',
+  'hallengeraet.loeschen': 'Hallengerät entfernen',
+  'inventur.beginnen': 'Zählgang beginnen',
+  'inventur.abschliessen': 'Zählgang abschließen',
+  'qualiarten.speichern': 'Qualifikation',
+  'qualiarten.loeschen': 'Qualifikation löschen',
+  'nachweise.speichern': 'Nachweis',
+  'nachweise.loeschen': 'Nachweis löschen',
+  'einsaetze.speichern': 'Einsatzbericht',
+  'einsaetze.loeschen': 'Bericht löschen',
+  'einsatzkraefte.speichern': 'Einsatzkraft',
+  'einsatzkraefte.loeschen': 'Einsatzkraft entfernen',
+};
+
+// ─────────────────────────────── Der Stand im Browser ───────────────────────────────
+
+/** Welche Liste des Datenstands welche Tabelle des Schemas ist. */
+const LISTE = {
+  lagerplaetze: 'lagerplaetze',
+  geraetetypen: 'typen',
+  geraete: 'geraete',
+  pruefplaene: 'plaene',
+  pruefschritte: 'schritte',
+  plan_stand: 'stand',
+  gruende: 'gruende',
+  satzarten: 'satzarten',
+  satzart_teile: 'satzteile',
+  saetze: 'saetze',
+  regeln: 'regeln',
+  mitglieder: 'mitglieder',
+  hallengeraete: 'hallengeraete',
+  qualiarten: 'qualiarten',
+  nachweise: 'nachweise',
+  einsaetze: 'einsaetze',
+  einsatz_kraefte: 'einsatzkraefte',
+};
+
+function lokalListe(d, tabelle) {
+  return Array.isArray(d[LISTE[tabelle]]) ? d[LISTE[tabelle]] : null;
+}
+
+function lokalFinden(d, tabelle, id) {
+  const l = lokalListe(d, tabelle);
+  return l && id ? l.find((x) => x.id === id) || null : null;
+}
+
+function lokalHolen(d, tabelle, id) {
+  const z = lokalFinden(d, tabelle, id);
+  if (!z) throw new Error((VORGABEN_.einzahl[tabelle] || tabelle) + ' nicht gefunden – vielleicht hat es gerade jemand gelöscht.');
+  return z;
+}
+
+function auswahlVon(a, felder) {
+  const aus = {};
+  felder.forEach((f) => {
+    if (a[f] !== undefined) aus[f] = a[f];
+  });
+  return aus;
+}
+
+/** Eine leere Zeile mit den Vorgaben des Schemas – so, wie `Vorgang_.einfuegen` sie anlegt. */
+function lokalLeer(tabelle) {
+  const z = {};
+  const sp = VORGABEN_.spalten[tabelle];
+  Object.keys(sp).forEach((k) => {
+    const art = sp[k];
+    z[k] = art === 'text' || art === 'geheim' || art === 'id' ? '' : art === 'bool' ? false : null;
+  });
+  return Object.assign(z, kopie(VORGABEN_.vorgaben[tabelle] || {}));
+}
+
+/** Ein Wert in der Form, die auch das Lesen aus dem Blatt liefert (`Vorgang_.normal_`). */
+function lokalWert(tabelle, spalte, wert) {
+  const art = VORGABEN_.spalten[tabelle][spalte];
+  if (art === 'bool') return !!wert;
+  if (art === 'json') return wert === undefined ? null : wert;
+  if (wert === null || wert === undefined) return art === 'text' || art === 'geheim' ? '' : null;
+  if (art === 'zahl') {
+    if (wert === '') return null;
+    const n = Number(String(wert).replace(',', '.'));
+    if (!Number.isFinite(n)) throw new Error('Keine gültige Zahl: ' + wert);
+    return Math.round(n);
+  }
+  if (art === 'ref' || art === 'zeit' || art === 'datum') {
+    const t = String(wert).trim();
+    return t === '' ? null : t;
+  }
+  return String(wert).trim();
+}
+
+/** Eindeutigkeit aus dem Schema – dieselben Regeln und Meldungen wie `Vorgang_.pruefen_`. */
+function lokalEindeutig(d, tabelle, obj, selbst) {
+  const liste = lokalListe(d, tabelle) || [];
+  (VORGABEN_.eindeutig[tabelle] || []).forEach((r) => {
+    if (r.spalten.some((f) => obj[f] === null || obj[f] === undefined || String(obj[f]).trim() === '')) return;
+    const schluessel = (z) => r.spalten.map((f) => (r.klein ? norm(z[f]) : String(z[f] == null ? '' : z[f]))).join('\u0001');
+    const soll = schluessel(obj);
+    if (liste.some((z) => z !== selbst && z.id !== obj.id && schluessel(z) === soll)) throw new Error(r.text);
+  });
+}
+
+/**
+ * Ändern (`a.id`) oder anlegen (unter `a.neu_id`). Ist die neue Kennung schon da – die
+ * Anlage wird nach einer Antwort des Servers ein zweites Mal angewandt –, wird geändert.
+ */
+function lokalSpeichern(d, tabelle, a, werte) {
+  const spalten = VORGABEN_.spalten[tabelle];
+  const n = {};
+  Object.keys(werte).forEach((k) => {
+    if (k in spalten && k !== 'id' && werte[k] !== undefined) n[k] = lokalWert(tabelle, k, werte[k]);
+  });
+  let z = a.id ? lokalHolen(d, tabelle, a.id) : lokalFinden(d, tabelle, a.neu_id);
+  if (z) {
+    lokalEindeutig(d, tabelle, Object.assign({}, z, n), z);
+    return Object.assign(z, n);
+  }
+  z = Object.assign(lokalLeer(tabelle), n, { id: a.neu_id || neueId() });
+  ['angelegt_am', 'erfasst_am'].forEach((k) => {
+    if (k in z && !z[k]) z[k] = jetztIso();
+  });
+  lokalEindeutig(d, tabelle, z, null);
+  lokalListe(d, tabelle).push(z);
+  return z;
+}
+
+/**
+ * Löschen nach den Verweisregeln des Schemas – wie `Vorgang_.loeschen`, aber nur über die
+ * Listen, die der Browser hat. Wer auf eine Tabelle verweist, die er nicht kennt
+ * (Buchungen, Prüfnachweise), entscheidet der Server.
+ */
+function lokalLoeschen(d, tabelle, id) {
+  const z = lokalHolen(d, tabelle, id);
+  const folgen = [];
+  (VORGABEN_.verweise[tabelle] || []).forEach((r) => {
+    const liste = lokalListe(d, r.tabelle);
+    if (!liste) return;
+    liste.forEach((x) => {
+      if (x[r.spalte] !== id || x === z) return;
+      if (r.regel === 'restrict') throw new Error(r.text || (VORGABEN_.einzahl[tabelle] || tabelle) + ' wird noch verwendet.');
+      folgen.push({ r: r, x: x });
+    });
+  });
+  folgen.forEach((f) => {
+    if (f.r.regel === 'cascade') {
+      if (lokalListe(d, f.r.tabelle).indexOf(f.x) >= 0) lokalLoeschen(d, f.r.tabelle, f.x.id);
+    } else {
+      f.x[f.r.spalte] = null;
+    }
+  });
+  const liste = lokalListe(d, tabelle);
+  const i = liste.indexOf(z);
+  if (i >= 0) liste.splice(i, 1);
+}
+
+function standNeu(s) {
+  return Object.assign(lokalLeer('plan_stand'), s, { id: 'lokal:' + s.geraet_id + ':' + s.pruefplan_id });
+}
+
+function faelligkeitenLokal(d, g) {
+  const plan = faelligkeitenPlan_(g, d.plaene, d.stand, d.heute);
+  plan.an.forEach((id) => {
+    lokalHolen(d, 'plan_stand', id).aktiv = true;
+  });
+  plan.neu.forEach((s) => d.stand.push(standNeu(s)));
+  plan.aus.forEach((id) => {
+    lokalHolen(d, 'plan_stand', id).aktiv = false;
+  });
+}
+
+function regelnLokal(d, ausloeser, g, kontext) {
+  const plan = regelnPlan_(d.regeln || [], ausloeser, g, kontext, d.stand, d.heute);
+  Object.assign(g, plan.geraet);
+  plan.stand.forEach((x) => {
+    const s = lokalFinden(d, 'plan_stand', x.id);
+    if (s) s.naechste_faellig = x.naechste_faellig;
+  });
+}
+
+/** Dasselbe wie `umlagern_` auf dem Server. Zurück: „6 gebucht, 2 standen schon dort“. */
+function umlagernLokal(d, ids, nachId, grundId) {
+  const nach = lokalHolen(d, 'lagerplaetze', nachId);
+  const grund = grundId ? lokalHolen(d, 'gruende', grundId) : null;
+  if (grund && !grund.aktiv) throw new Error('Der Grund „' + grund.name + '“ ist stillgelegt.');
+  const liste = (ids || []).map(String).filter((id, i, alle) => alle.indexOf(id) === i);
+  if (!liste.length) throw new Error('Keine Geräte gewählt.');
+  const r = { gebucht: 0, schonDa: 0 };
+  liste.forEach((id) => {
+    const g = lokalHolen(d, 'geraete', id);
+    if (g.lagerplatz_id === nach.id) {
+      r.schonDa++;
+      return;
+    }
+    g.lagerplatz_id = nach.id;
+    g.status = statusNachGrund_(g.status, grund);
+    regelnLokal(d, 'umlagerung', g, { grund: grund ? grund.name : '', zielTyp: nach.typ });
+    r.gebucht++;
+  });
+  return r;
+}
+
+function grundInventurLokal(d) {
+  const g = d.gruende.find((x) => x.name === 'Inventur');
+  return g && g.aktiv ? g : null;
+}
+
+function personalLokal(d) {
+  if (!d.qualiarten || !d.nachweise) throw new Error('Das Personalmodul ist ausgeschaltet (Einstellungen → Personal).');
+}
+
+function einsatzLokal(d) {
+  personalLokal(d);
+  if (!d.einsaetze || !d.einsatzkraefte) throw new Error('Die Einsätze sind noch nicht geladen – bitte die Seite neu laden.');
+}
+
+function ohneFehler(text) {
+  if (text) throw new Error(text);
+}
+
+/**
+ * Was jede Aktion am Stand im Browser ändert – die Vorhersage dessen, was der Server tun
+ * wird. Wirft eine davon, ist die Eingabe unzulässig, und die Änderung geht nicht hinaus.
+ * Regeln, die auch der Server prüfen muss, kommen aus `05_Gemeinsam.js`; was hier steht,
+ * ist das Hin- und Herschieben in den Listen.
+ *
+ * Eine Aktion ohne Eintrag hier geht trotzdem an den Server – sie wird dann nur nicht
+ * vorweggenommen. Was zurückkommt, bekommt der Aufrufer als `vorschau`.
+ */
+const ANWENDEN = {
+  'betrieb.umlagern': (d, a) => umlagernLokal(d, a.geraete, a.nach, a.grund || null),
+
+  'betrieb.gereinigt': (d, a) => {
+    const g = lokalHolen(d, 'geraete', a.geraet);
+    if (g.status !== 'zu_reinigen') throw new Error((g.bezeichnung || g.barcode) + ' steht nicht auf „zu reinigen“.');
+    g.status = 'einsatzbereit';
+  },
+
+  'betrieb.statusSetzen': (d, a) => {
+    if (STATUS.indexOf(a.status) < 0) throw new Error('Unbekannter Status.');
+    const ids = Array.isArray(a.geraete) ? a.geraete : [a.geraet];
+    const notiz = String(a.bemerkung || '').trim();
+    ids.forEach((id) => {
+      const g = lokalHolen(d, 'geraete', id);
+      g.status = a.status;
+      if (notiz) g.bemerkung = (g.bemerkung ? g.bemerkung + '\n' : '') + notiz;
+    });
+    return ids.length;
+  },
+
+  'pruefungen.erfassen': (d, a) => {
+    const g = lokalHolen(d, 'geraete', a.geraet);
+    const plan = lokalHolen(d, 'pruefplaene', a.plan);
+    if (plan.geraetetyp_id !== g.geraetetyp_id || (plan.geraet_id && plan.geraet_id !== g.id)) throw new Error('Dieser Prüfplan gehört nicht zu diesem Gerät.');
+    if (['bestanden', 'nicht_bestanden'].indexOf(a.ergebnis) < 0) throw new Error('Bitte ein Ergebnis wählen.');
+    const datum = a.datum || d.heute;
+    if (!istDatum_(datum)) throw new Error('Kein gültiges Prüfdatum.');
+    if (datum > d.heute) throw new Error('Das Prüfdatum liegt in der Zukunft.');
+    const stand = d.stand.find((s) => s.geraet_id === g.id && s.pruefplan_id === plan.id);
+    const folgen = pruefungFolgen_(g, plan, stand, a.ergebnis, datum, a.status_danach);
+    if (folgen.stand) Object.assign(stand, folgen.stand);
+    if (folgen.status) g.status = folgen.status;
+    regelnLokal(d, 'pruefung', g, { ergebnis: a.ergebnis });
+  },
+
+  'faelligkeit.aendern': (d, a) => {
+    const s = lokalHolen(d, 'plan_stand', a.id);
+    const r = faelligkeitWerte_(s, lokalFinden(d, 'pruefplaene', s.pruefplan_id), a);
+    ohneFehler(r.fehler);
+    Object.assign(s, r.werte);
+  },
+
+  'lagerplaetze.speichern': (d, a) => {
+    const werte = auswahlVon(a, ['name', 'code', 'typ', 'ober_id']);
+    if (a.id && !String(werte.code || '').trim()) delete werte.code;
+    if (werte.ober_id && a.id && lagerplatzZyklus_(d.lagerplaetze, a.id, werte.ober_id)) throw new Error('Ein Lagerplatz kann nicht unter sich selbst hängen.');
+    const l = lokalSpeichern(d, 'lagerplaetze', a, werte);
+    if (!('zuletzt_gezaehlt' in l)) l.zuletzt_gezaehlt = null;
+  },
+  'lagerplaetze.loeschen': (d, a) => lokalLoeschen(d, 'lagerplaetze', a.id),
+
+  'typen.speichern': (d, a) => {
+    lokalSpeichern(d, 'geraetetypen', a, auswahlVon(a, ['name', 'hersteller', 'modell', 'beschreibung']));
+  },
+  'typen.loeschen': (d, a) => lokalLoeschen(d, 'geraetetypen', a.id),
+
+  'plaene.speichern': (d, a) => {
+    const werte = auswahlVon(a, ['geraetetyp_id', 'geraet_id', 'name', 'intervall_wert', 'intervall_einheit', 'beschreibung']);
+    if (Number(werte.intervall_wert) <= 0) throw new Error('Das Intervall muss größer als null sein.');
+    if (!a.id) {
+      if (werte.geraet_id) werte.geraetetyp_id = lokalHolen(d, 'geraete', werte.geraet_id).geraetetyp_id;
+      const p = lokalSpeichern(d, 'pruefplaene', a, werte);
+      planVerteilenPlan_(p, d.geraete, d.stand, d.heute).forEach((s) => d.stand.push(standNeu(s)));
+      return;
+    }
+    const alt = lokalHolen(d, 'pruefplaene', a.id);
+    if (werte.geraetetyp_id && werte.geraetetyp_id !== alt.geraetetyp_id) throw new Error('Ein Prüfplan wechselt nicht den Gerätetyp. Bitte am anderen Typ neu anlegen.');
+    delete werte.geraet_id;
+    const vorher = { wert: alt.intervall_wert, einheit: alt.intervall_einheit };
+    const p = lokalSpeichern(d, 'pruefplaene', a, werte);
+    if (vorher.wert !== p.intervall_wert || vorher.einheit !== p.intervall_einheit) {
+      planIntervallFolgen_(p, d.stand).forEach((x) => {
+        lokalHolen(d, 'plan_stand', x.id).naechste_faellig = x.naechste_faellig;
+      });
+    }
+  },
+  'plaene.loeschen': (d, a) => lokalLoeschen(d, 'pruefplaene', a.id),
+
+  'schritte.speichern': (d, a) => {
+    const plan = lokalHolen(d, 'pruefplaene', a.plan_id);
+    const liste = Array.isArray(a.schritte) ? a.schritte : [];
+    const bleiben = liste.filter((s) => s.id).map((s) => String(s.id));
+    d.schritte = d.schritte.filter((s) => s.pruefplan_id !== plan.id || bleiben.indexOf(s.id) >= 0);
+    liste.forEach((s, i) => {
+      const werte = auswahlVon(s, ['titel', 'beschreibung', 'art', 'einheit', 'pflicht']);
+      werte.position = i + 1;
+      if (werte.art !== 'messwert') werte.einheit = '';
+      if (s.id) {
+        if (lokalHolen(d, 'pruefschritte', s.id).pruefplan_id !== plan.id) throw new Error('Der Schritt gehört zu einem anderen Plan.');
+        lokalSpeichern(d, 'pruefschritte', { id: s.id }, werte);
+      } else {
+        werte.pruefplan_id = plan.id;
+        lokalSpeichern(d, 'pruefschritte', { neu_id: s.neu_id }, werte);
+      }
+    });
+  },
+
+  'geraete.speichern': (d, a) => {
+    if (!a.id) {
+      const g = lokalSpeichern(d, 'geraete', a, auswahlVon(a, ['geraetetyp_id', 'lagerplatz_id', 'bezeichnung', 'seriennummer', 'barcode', 'status', 'bemerkung']));
+      if (!('satz_id' in g)) g.satz_id = null;
+      faelligkeitenLokal(d, g);
+      return;
+    }
+    const werte = auswahlVon(a, ['geraetetyp_id', 'bezeichnung', 'seriennummer', 'barcode', 'status', 'bemerkung']);
+    if (!String(werte.barcode || '').trim()) delete werte.barcode;
+    const g = lokalHolen(d, 'geraete', a.id);
+    const typVorher = g.geraetetyp_id;
+    lokalSpeichern(d, 'geraete', a, werte);
+    if (typVorher !== g.geraetetyp_id) faelligkeitenLokal(d, g);
+  },
+
+  'gruende.speichern': (d, a) => {
+    const werte = auswahlVon(a, ['name', 'beschreibung', 'status_danach', 'aktiv']);
+    if (!werte.status_danach) werte.status_danach = '';
+    if (!a.id) werte.position = d.gruende.reduce((m, g) => Math.max(m, g.position || 0), 0) + 1;
+    lokalSpeichern(d, 'gruende', a, werte);
+  },
+  'gruende.verschieben': (d, a) => {
+    const liste = d.gruende.slice().sort((x, y) => (x.position || 0) - (y.position || 0));
+    const i = liste.findIndex((g) => g.id === a.id);
+    if (i < 0) throw new Error('Grund nicht gefunden.');
+    const j = i + (a.richtung < 0 ? -1 : 1);
+    if (j < 0 || j >= liste.length) return;
+    const tausch = liste[i];
+    liste[i] = liste[j];
+    liste[j] = tausch;
+    liste.forEach((g, k) => {
+      g.position = k + 1;
+    });
+  },
+  'gruende.loeschen': (d, a) => lokalLoeschen(d, 'gruende', a.id),
+
+  'einstellungen.speichern': (d, a) => {
+    const werte = a.werte || {};
+    Object.keys(werte).forEach((k) => {
+      const r = einstellungPruefen_(k, werte[k], VORGABEN_.einstellungen, d.lagerplaetze);
+      ohneFehler(r.fehler);
+      // Wie `Vorgang_.einstellung`: leer heißt Vorgabe.
+      const wert = r.wert !== '' ? r.wert : VORGABEN_.einstellungen[k].vorgabe;
+      d.einstellungen[k] = wert;
+      if (k === 'wehr_name') d.wehr.name = wert;
+      if (k === 'wehr_zusatz') d.wehr.zusatz = wert;
+      if (k === 'modul_personal') {
+        d.module.personal = wert !== 'nein';
+        if (wert === 'nein') {
+          ['qualiarten', 'nachweise', 'einsaetze', 'einsatzkraefte', 'einsatzZeitraum', 'einsatzArchiv', 'atemschutzVorher'].forEach((x) => delete d[x]);
+        }
+      }
+    });
+  },
+  'einstellungen.logo': (d, a) => {
+    d.wehr.logo = String(a.logo || '');
+  },
+
+  'satzarten.speichern': (d, a) => {
+    const art = lokalSpeichern(d, 'satzarten', a, auswahlVon(a, ['name', 'beschreibung']));
+    if (!Array.isArray(a.teile)) return;
+    const neu = a.teile.filter((t) => t && t.geraetetyp_id);
+    ohneFehler(satzteilePruefen_(neu));
+    const typen = neu.map((t) => t.geraetetyp_id);
+    const da = d.satzteile.filter((t) => t.satzart_id === art.id);
+    d.satzteile = d.satzteile.filter((t) => t.satzart_id !== art.id || typen.indexOf(t.geraetetyp_id) >= 0);
+    neu.forEach((t) => {
+      const werte = { min_anzahl: Number(t.min_anzahl), max_anzahl: Number(t.max_anzahl), bemerkung: t.bemerkung || '' };
+      const vorhanden = da.find((x) => x.geraetetyp_id === t.geraetetyp_id);
+      if (vorhanden) lokalSpeichern(d, 'satzart_teile', { id: vorhanden.id }, werte);
+      else lokalSpeichern(d, 'satzart_teile', { neu_id: 'lokal:' + art.id + ':' + t.geraetetyp_id }, Object.assign({ satzart_id: art.id, geraetetyp_id: t.geraetetyp_id }, werte));
+    });
+  },
+  'satzarten.loeschen': (d, a) => lokalLoeschen(d, 'satzarten', a.id),
+
+  'saetze.speichern': (d, a) => {
+    const werte = auswahlVon(a, ['name', 'satzart_id', 'barcode', 'bemerkung']);
+    if (a.id && !String(werte.barcode || '').trim()) delete werte.barcode;
+    if (werte.satzart_id === '') werte.satzart_id = null;
+    lokalSpeichern(d, 'saetze', a, werte);
+  },
+  'saetze.loeschen': (d, a) => {
+    const s = lokalHolen(d, 'saetze', a.id);
+    d.geraete.forEach((g) => {
+      if (g.satz_id === s.id) g.satz_id = null;
+    });
+    lokalLoeschen(d, 'saetze', s.id);
+  },
+  'saetze.hinzufuegen': (d, a) => {
+    const s = lokalHolen(d, 'saetze', a.satz);
+    const r = { neu: 0, gewechselt: 0 };
+    (a.geraete || []).forEach((id) => {
+      const g = lokalHolen(d, 'geraete', id);
+      if (g.satz_id === s.id) return;
+      if (g.satz_id) r.gewechselt++;
+      g.satz_id = s.id;
+      r.neu++;
+    });
+    return r;
+  },
+  'saetze.entfernen': (d, a) => {
+    const ids = (a.geraete || []).map(String);
+    d.geraete.forEach((g) => {
+      if (g.satz_id === a.satz && ids.indexOf(g.id) >= 0) g.satz_id = null;
+    });
+  },
+
+  'regeln.speichern': (d, a) => {
+    const r = regelBereinigen_(a);
+    ohneFehler(r.fehler);
+    lokalSpeichern(d, 'regeln', a, {
+      name: a.name,
+      beschreibung: a.beschreibung,
+      ausloeser: a.ausloeser,
+      bedingungen: r.bedingungen,
+      aktionen: r.aktionen,
+      aktiv: a.aktiv !== false,
+      position: Number(a.position) || 0,
+    });
+  },
+  'regeln.loeschen': (d, a) => lokalLoeschen(d, 'regeln', a.id),
+
+  'mitglieder.speichern': (d, a) => {
+    const r = mitgliedWerte_(a);
+    ohneFehler(r.fehler);
+    if (!a.id) {
+      r.werte.aktiv = true;
+      const m = lokalSpeichern(d, 'mitglieder', a, r.werte);
+      ['ausweis_seit', 'zuletzt_gesehen'].forEach((k) => {
+        if (!(k in m)) m[k] = null;
+      });
+      delete m.angelegt_am;
+      return;
+    }
+    const m = lokalHolen(d, 'mitglieder', a.id);
+    ohneFehler(mitgliedAenderungPruefen_(d.mitglieder, m, r.werte, d.ich.id));
+    lokalSpeichern(d, 'mitglieder', a, r.werte);
+  },
+  'mitglieder.loeschen': (d, a) => {
+    const m = lokalHolen(d, 'mitglieder', a.id);
+    ohneFehler(mitgliedLoeschenPruefen_(d.mitglieder, m, d.ich.id));
+    lokalLoeschen(d, 'mitglieder', m.id);
+  },
+  'ausweis.zurueckziehen': (d, a) => {
+    const m = lokalFinden(d, 'mitglieder', a.mitglied);
+    if (m) m.ausweis_seit = null;
+  },
+
+  'hallengeraet.aendern': (d, a) => {
+    const werte = auswahlVon(a, ['name', 'geteilt', 'abmelden_nach_min', 'kuerzel_erlaubt', 'gesperrt']);
+    if (werte.geteilt === false) werte.abmelden_nach_min = 0;
+    lokalSpeichern(d, 'hallengeraete', { id: a.id }, werte);
+  },
+  'hallengeraet.loeschen': (d, a) => lokalLoeschen(d, 'hallengeraete', a.id),
+
+  'inventur.beginnen': (d, a) => {
+    const ort = lokalHolen(d, 'lagerplaetze', a.lagerplatz);
+    const offen = d.inventurenOffen.find((i) => i.lagerplatz_id === ort.id);
+    if (offen) return { id: offen.id, fortgesetzt: true };
+    d.inventurenOffen.push({ id: a.neu_id, lagerplatz_id: ort.id, benutzer_name: d.ich.name, begonnen_am: jetztIso() });
+    return { id: a.neu_id, fortgesetzt: false };
+  },
+  'inventur.abschliessen': (d, a) => {
+    const inv = d.inventurenOffen.find((i) => i.id === a.id);
+    if (!inv) throw new Error('Dieser Zählgang ist schon abgeschlossen.');
+    const ort = lokalFinden(d, 'lagerplaetze', inv.lagerplatz_id);
+    if (!ort) throw new Error('Den Lagerplatz dieses Zählgangs gibt es nicht mehr.');
+    const befund = inventurBefund_(d.geraete, ort.id, a.gefunden);
+    if (a.korrigieren && befund.fremd.length) {
+      const grund = grundInventurLokal(d);
+      umlagernLokal(d, befund.fremd, ort.id, grund ? grund.id : null);
+    }
+    let vermisst = 0;
+    const code = String(d.einstellungen.inventur_vermisst_code || '').trim();
+    if (a.vermisst && code && befund.fehlt.length) {
+      const ziel = d.lagerplaetze.find((l) => norm(l.code) === norm(code));
+      if (!ziel) throw new Error('Den eingestellten Platz für Vermisstes („' + code + '“) gibt es nicht.');
+      if (ziel.id !== ort.id) {
+        const grund = grundInventurLokal(d);
+        vermisst = umlagernLokal(d, befund.fehlt, ziel.id, grund ? grund.id : null).gebucht;
+      }
+    }
+    d.inventurenOffen = d.inventurenOffen.filter((i) => i.id !== inv.id);
+    ort.zuletzt_gezaehlt = jetztIso();
+    return Object.assign({ id: inv.id, vermisstGebucht: vermisst }, befund);
+  },
+
+  'qualiarten.speichern': (d, a) => {
+    personalLokal(d);
+    const werte = auswahlVon(a, ['name', 'beschreibung', 'gueltig_wert', 'gueltig_einheit', 'atemschutz', 'aus_einsatz', 'aktiv']);
+    if (werte.gueltig_wert === '') werte.gueltig_wert = null;
+    if (werte.gueltig_einheit === '') werte.gueltig_einheit = null;
+    const alt = a.id ? lokalHolen(d, 'qualiarten', a.id) : null;
+    ohneFehler(qualiartPruefen_(Object.assign({}, alt || {}, werte)));
+    if (!alt) werte.position = d.qualiarten.reduce((m, q) => Math.max(m, q.position || 0), 0) + 1;
+    lokalSpeichern(d, 'qualiarten', a, werte);
+  },
+  'qualiarten.loeschen': (d, a) => {
+    personalLokal(d);
+    lokalLoeschen(d, 'qualiarten', a.id);
+  },
+  'nachweise.speichern': (d, a) => {
+    personalLokal(d);
+    const werte = auswahlVon(a, ['mitglied_id', 'art_id', 'erworben_am', 'gueltig_bis', 'bemerkung']);
+    if (werte.gueltig_bis === '') werte.gueltig_bis = null;
+    const alt = a.id ? lokalHolen(d, 'nachweise', a.id) : null;
+    const voll = Object.assign({}, alt || {}, werte);
+    const art = lokalFinden(d, 'qualiarten', voll.art_id);
+    if (art && (!alt || voll.art_id !== alt.art_id) && !art.aktiv) throw new Error('Die Qualifikation „' + art.name + '“ ist stillgelegt.');
+    if (!alt && werte.gueltig_bis === undefined) voll.gueltig_bis = werte.gueltig_bis = nachweisBis_(art, voll.erworben_am) || null;
+    ohneFehler(nachweisPruefen_(voll, art, d.heute));
+    lokalHolen(d, 'mitglieder', voll.mitglied_id);
+    if (!alt) werte.erfasst_von = d.ich.name;
+    lokalSpeichern(d, 'nachweise', a, werte);
+  },
+  'nachweise.loeschen': (d, a) => {
+    personalLokal(d);
+    lokalLoeschen(d, 'nachweise', a.id);
+  },
+
+  /**
+   * Wie `einsatzAnlegen_`: prüfen, Altes ersetzen, anlegen, Kräfte dazu. Die Abschrift des
+   * Tagebuchs steht nicht im Stand – sie wird nur geprüft. Ist der Bericht älter als der
+   * Zeitraum, den der Browser hat, zeigt der Stand des Servers davon nur das Jahr und den
+   * Atemschutz; so auch hier.
+   */
+  'einsaetze.speichern': (d, a) => {
+    einsatzLokal(d);
+    const werte = einsatzWerte_(a);
+    if (a.id) {
+      ohneFehler(einsatzPruefen_(Object.assign({}, lokalHolen(d, 'einsaetze', a.id), werte)));
+      lokalSpeichern(d, 'einsaetze', a, werte);
+      return { id: a.id };
+    }
+    ohneFehler(einsatzPruefen_(werte));
+    const kraefte = Array.isArray(a.kraefte) ? a.kraefte : [];
+    const tagebuch = Array.isArray(a.tagebuch) ? a.tagebuch : [];
+    if (kraefte.length > 500 || tagebuch.length > 5000) throw new Error('Zu viele Einträge für einen Bericht.');
+    if (a.ersetzt && lokalFinden(d, 'einsaetze', a.ersetzt)) lokalLoeschen(d, 'einsaetze', a.ersetzt);
+    Object.assign(werte, {
+      quelle: a.quelle === 'einsatztagebuch' ? 'einsatztagebuch' : '',
+      quelle_kennung: String(a.quelle_kennung == null ? '' : a.quelle_kennung).trim().slice(0, 120),
+      tagebuch_eintraege: tagebuch.filter((t) => t.liste !== 'kraefte').length,
+      erfasst_von: d.ich.name,
+    });
+    const imZeitraum = tagVon_(werte.beginn) >= d.einsatzZeitraum;
+    const e = imZeitraum ? lokalSpeichern(d, 'einsaetze', a, werte) : Object.assign({ id: a.neu_id }, werte);
+    if (!imZeitraum) lokalEindeutig(d, 'einsaetze', e, null);
+    kraefte.forEach((k) => {
+      const m = k.art !== 'mittel' && k.mitglied_id ? lokalHolen(d, 'mitglieder', k.mitglied_id) : null;
+      const r = kraftWerte_(k, m);
+      ohneFehler(r.fehler);
+      if (imZeitraum) lokalSpeichern(d, 'einsatz_kraefte', { neu_id: k.neu_id }, Object.assign({ einsatz_id: e.id }, r.werte));
+      else atemschutzMerken_(d.atemschutzVorher, e, r.werte);
+    });
+    tagebuch.forEach((t) => {
+      if (!istZeit_(String(t.zeit == null ? '' : t.zeit).trim())) throw new Error('Ein Tagebucheintrag hat keine gültige Uhrzeit.');
+    });
+    if (!imZeitraum) {
+      const jahr = tagVon_(werte.beginn).slice(0, 4);
+      if (d.einsatzArchiv.indexOf(jahr) < 0) d.einsatzArchiv = d.einsatzArchiv.concat([jahr]).sort().reverse();
+    }
+    return { id: e.id };
+  },
+  'einsaetze.loeschen': (d, a) => {
+    einsatzLokal(d);
+    lokalLoeschen(d, 'einsaetze', a.id);
+  },
+  'einsatzkraefte.speichern': (d, a) => {
+    einsatzLokal(d);
+    const alt = a.id ? lokalHolen(d, 'einsatz_kraefte', a.id) : null;
+    const einsatz = lokalHolen(d, 'einsaetze', alt ? alt.einsatz_id : a.einsatz_id);
+    const voll = Object.assign({}, alt || {}, auswahlVon(a, ['mitglied_id', 'name', 'art', 'von', 'bis', 'atemschutz', 'funktion']));
+    const m = voll.art !== 'mittel' && voll.mitglied_id ? lokalHolen(d, 'mitglieder', voll.mitglied_id) : null;
+    const r = kraftWerte_(voll, m);
+    ohneFehler(r.fehler);
+    lokalSpeichern(d, 'einsatz_kraefte', a, alt ? r.werte : Object.assign({ einsatz_id: einsatz.id }, r.werte));
+  },
+  'einsatzkraefte.loeschen': (d, a) => {
+    einsatzLokal(d);
+    lokalLoeschen(d, 'einsatz_kraefte', a.id);
+  },
+};
+
+function anwenden(d, op) {
+  const f = ANWENDEN[op.name];
+  return f ? f(d, op.args || {}) : undefined;
+}
+
+// ─────────────────────────────── Die Schlange ───────────────────────────────
+
+const SYNC_FENSTER = neueId().slice(0, 8);
+
+const Sync = {
+  schlange: [],
+  unterwegs: null,
+  offline: false,
+  versuche: 0,
+  letzterFehler: '',
+  timer: null,
+  wartende: [],
+  // Zählt jeden beantworteten Stapel. Ein Stand, der älter ist als die letzte Antwort,
+  // wird verworfen – sonst überschriebe eine späte Abfrage, was gerade gespeichert wurde.
+  epoche: 0,
+  zuletzt: null,
+
+  /**
+   * Darf diese Änderung jetzt hinaus? Am Hallengerät gehört sie ihrem Token; am
+   * Schreibtisch nur dem Google-Konto, das gerade angemeldet ist – und das weiß man erst,
+   * wenn der Stand da ist.
+   */
+  sendbar(o) {
+    if (o.token) return true;
+    return !!(Z.basis && !Z.token && o.wer === Z.basis.ich.id);
+  },
+  anzahl() {
+    return this.schlange.filter((o) => this.sendbar(o)).length;
+  },
+  ruhig() {
+    return !this.unterwegs && !this.anzahl();
+  },
+  eigene() {
+    return Z.basis ? this.schlange.filter((o) => o.wer === Z.basis.ich.id) : [];
+  },
+
+  /**
+   * Eine Änderung: sofort anzeigen, im Hintergrund speichern. Wirft, wenn die Eingabe
+   * schon hier unzulässig ist. Zurück: die Änderung, ein Versprechen auf die Antwort des
+   * Servers (`{ ok, ergebnis | fehler }`, nie abgelehnt) und die `vorschau` – was die
+   * Vorhersage ergab, etwa „6 gebucht, 2 standen schon dort“.
+   */
+  tun(name, args) {
+    if (!Z.daten || !Z.basis) throw new Error('Der Datenstand ist noch nicht geladen – bitte einen Moment.');
+    const op = {
+      op: neueId(),
+      name: name,
+      args: JSON.parse(JSON.stringify(args || {})),
+      wer: Z.daten.ich.id,
+      token: Z.token || null,
+      zeit: Date.now(),
+    };
+    const probe = kopie(Z.daten);
+    const vorschau = anwenden(probe, op);
+    ableiten_(probe);
+    op.bestaetigt = new Promise((erfuellt) => {
+      op.erfuellt = erfuellt;
+    });
+    this.schlange.push(op);
+    this.sichern();
+    datenSetzen(probe);
+    this.melden();
+    this.planen(SYNC_VERZOEGERUNG);
+    return { op: op, bestaetigt: op.bestaetigt, vorschau: vorschau };
+  },
+
+  planen(ms) {
+    clearTimeout(this.timer);
+    this.timer = setTimeout(() => this.senden(), ms);
+  },
+
+  senden() {
+    clearTimeout(this.timer);
+    this.timer = null;
+    if (this.unterwegs) return;
+    const erste = this.schlange.find((o) => this.sendbar(o));
+    if (!erste) {
+      this.melden();
+      this.wartendeLoesen();
+      return;
+    }
+    const stapel = this.schlange
+      .filter((o) => this.sendbar(o) && o.token === erste.token && o.wer === erste.wer)
+      .slice(0, SYNC_STAPEL);
+    this.unterwegs = stapel;
+    this.melden();
+    google.script.run
+      .withSuccessHandler((text) => this.antwort(stapel, text))
+      .withFailureHandler((e) => this.fehlschlag(e))
+      .aufruf(erste.token, 'stapel', { ops: stapel.map((o) => ({ op: o.op, name: o.name, args: o.args })) });
+  },
+
+  antwort(stapel, text) {
+    let a = null;
+    try {
+      a = JSON.parse(text);
+    } catch (e) {
+      a = null;
+    }
+    if (!a) return this.fehlschlag(new Error('Unlesbare Antwort vom Server.'));
+    // Die Sperre war belegt: nichts ist passiert, gleich noch einmal.
+    if (!a.ok && a.code === 'gesperrt') return this.fehlschlag(new Error(a.fehler));
+    this.unterwegs = null;
+    this.offline = false;
+    this.versuche = 0;
+    this.letzterFehler = '';
+    this.epoche++;
+    stapel.forEach((o, i) => {
+      const r = a.ok
+        ? (a.ergebnis || [])[i] || { ok: false, fehler: 'Der Server hat diese Änderung nicht beantwortet.', code: 'intern' }
+        : { ok: false, fehler: a.fehler, code: a.code };
+      this.erledigt(o, r);
+    });
+    this.sichern();
+    const erste = stapel[0];
+    const eigen = erste.token ? erste.token === Z.token : !Z.token && !!Z.basis && erste.wer === Z.basis.ich.id;
+    if (!a.ok && a.code === 'abgemeldet' && eigen && Z.token) sitzungVerloren(a.fehler);
+    else if (!a.ok && a.code === 'kein_zugang' && eigen) keinZugangSetzen(a.fehler);
+    else if (a.ok && a.stand && eigen) basisSetzen(a.stand);
+    else {
+      neuAufbauen();
+      if (a.ok) nachfragenBald();
+    }
+    this.melden();
+    if (this.anzahl()) this.senden();
+    else this.wartendeLoesen();
+  },
+
+  /** Keine Verbindung: Nichts geht verloren, es wird nur später geschickt. */
+  fehlschlag(e) {
+    this.unterwegs = null;
+    this.versuche++;
+    this.offline = true;
+    this.letzterFehler = e && e.message ? e.message : String(e);
+    this.melden();
+    this.wartendeLoesen();
+    this.planen(Math.min(30000, 1000 * Math.pow(2, Math.min(this.versuche, 5))));
+  },
+
+  erledigt(o, r) {
+    const i = this.schlange.indexOf(o);
+    if (i >= 0) this.schlange.splice(i, 1);
+    if (!r.ok && r.code !== 'verworfen') {
+      const text = 'Nicht gespeichert – ' + (OP_TEXT[o.name] || 'Änderung') + ': ' + r.fehler;
+      if (o.nochmal) meldung.fehlerMit(text, 'Nochmal öffnen', () => o.nochmal(r.fehler));
+      else meldung.fehler(new Error(text));
+      if (document.body.classList.contains('halle-aktiv')) piepFehler();
+    }
+    if (o.erfuellt) o.erfuellt(r);
+  },
+
+  /** Was noch nicht hinaus ist, aufgeben – der Ausweg, wenn eine Änderung nie ankommt. */
+  verwerfen() {
+    this.schlange.filter((o) => this.sendbar(o) && !(this.unterwegs || []).includes(o))
+      .forEach((o) => this.erledigt(o, { ok: false, fehler: 'verworfen', code: 'verworfen' }));
+    this.sichern();
+    neuAufbauen();
+    this.melden();
+    this.wartendeLoesen();
+  },
+
+  /** Bis alles gespeichert ist – oder bis klar ist, dass es gerade nicht geht. */
+  abwarten() {
+    if (this.ruhig() || this.offline) return Promise.resolve();
+    return new Promise((r) => this.wartende.push(r));
+  },
+  wartendeLoesen() {
+    if (!(this.ruhig() || this.offline)) return;
+    const w = this.wartende;
+    this.wartende = [];
+    w.forEach((r) => r());
+  },
+
+  /**
+   * In `localStorage`, je Fenster unter eigenem Schlüssel – zwei offene Fenster
+   * überschrieben einander sonst die Schlange. Beim Start übernimmt jedes Fenster, was
+   * liegen geblieben ist; schickt es eine Änderung, die ein anderes noch offenes Fenster
+   * auch schickt, erkennt der Server sie an ihrer Kennung.
+   */
+  sichern() {
+    const k = 'warteschlange.' + SYNC_FENSTER;
+    if (!this.schlange.length) {
+      Ablage.entfernen(k);
+      return;
+    }
+    Ablage.schreiben(k, this.schlange.map((o) => ({ op: o.op, name: o.name, args: o.args, wer: o.wer, token: o.token, zeit: o.zeit })));
+  },
+  laden() {
+    const gesehen = {};
+    let alle = [];
+    try {
+      Object.keys(localStorage).filter((k) => k.indexOf('fwm.warteschlange.') === 0).forEach((k) => {
+        const liste = Ablage.lesen(k.slice(4), []) || [];
+        alle = alle.concat(Array.isArray(liste) ? liste : []);
+        localStorage.removeItem(k);
+      });
+    } catch (e) {
+      // Kein Speicher: dann gibt es auch nichts nachzuholen.
+    }
+    const grenze = Date.now() - SYNC_HALTBAR;
+    this.schlange = alle
+      .filter((o) => o && o.op && o.name && o.zeit > grenze && !gesehen[o.op] && (gesehen[o.op] = true))
+      .sort((a, b) => a.zeit - b.zeit);
+    this.sichern();
+  },
+
+  melden() {
+    document.querySelectorAll('.sync-anzeige').forEach(syncAnzeigeFuellen);
+    if (offenerSyncDialog && !offenerSyncDialog.zu) offenerSyncDialog.neu();
+  },
+};
+
+/** Der Stand des Servers wird die Basis; angezeigt wird Basis + eigene offene Änderungen. */
+function basisSetzen(stand) {
+  Z.basis = stand;
+  Sync.zuletzt = Date.now();
+  neuAufbauen();
+}
+
+function neuAufbauen() {
+  if (!Z.basis) return;
+  const eigene = Sync.eigene();
+  if (!eigene.length) {
+    datenSetzen(Z.basis);
+    return;
+  }
+  const d = kopie(Z.basis);
+  eigene.forEach((o) => {
+    try {
+      anwenden(d, o);
+    } catch (e) {
+      // Passt nicht mehr auf den neuen Stand – ob es gilt, sagt gleich der Server.
+    }
+  });
+  datenSetzen(ableiten_(d));
+}
+
+/**
+ * Nachsehen, ob jemand anders etwas geändert hat – billig, ein Abruf im Zwischenspeicher.
+ * Nicht, solange eigene Änderungen unterwegs sind: Deren Antwort bringt den Stand ohnehin.
+ */
+async function nachfragen(erzwingen) {
+  if (!Z.basis || (!erzwingen && document.hidden) || Z.laufend || !Sync.ruhig() || nachfragen.laeuft) return;
+  nachfragen.laeuft = true;
+  const epoche = Sync.epoche;
+  try {
+    const rev = await api('daten.revision', {}, { still: true, sofort: true });
+    if (Z.basis && (erzwingen || (rev && rev !== Z.basis.rev))) {
+      const stand = await api('daten.laden', {}, { still: true, sofort: true });
+      if (Z.basis && epoche === Sync.epoche) basisSetzen(stand);
+    }
+  } catch (e) {
+    // Beim nächsten Mal wieder.
+  }
+  nachfragen.laeuft = false;
+}
+
+let nachfragenTimer = null;
+function nachfragenBald() {
+  clearTimeout(nachfragenTimer);
+  nachfragenTimer = setTimeout(() => nachfragen(true), 600);
+}
+
+/**
+ * Der kurze Weg für einen Knopf: ändern, Erfolg melden – oder sagen, warum es schon im
+ * Browser nicht geht. Zurück: die Änderung (oder `null`).
+ */
+function sofort(name, args, erfolgText) {
+  try {
+    const r = Sync.tun(name, args);
+    if (erfolgText) meldung.erfolg(erfolgText);
+    return r;
+  } catch (e) {
+    meldung.fehler(e);
+    return null;
+  }
+}
+
+// ─────────────────────────────── Anzeige ───────────────────────────────
+
+let offenerSyncDialog = null;
+
+function syncAnzeige(kompakt) {
+  const el = h('button.sync-anzeige' + (kompakt ? '.kompakt' : ''), { type: 'button', onclick: syncDialog });
+  syncAnzeigeFuellen(el);
+  return el;
+}
+
+function syncAnzeigeFuellen(el) {
+  const n = Sync.anzahl();
+  const zustand = Sync.offline && n ? 'offline' : n || Sync.unterwegs ? 'sendet' : 'ruhig';
+  ['ruhig', 'sendet', 'offline'].forEach((k) => el.classList.toggle(k, k === zustand));
+  const text = zustand === 'ruhig'
+    ? 'Gespeichert'
+    : zustand === 'sendet'
+      ? 'Speichert …' + (n > 1 ? ' (' + n + ')' : '')
+      : 'Offline · ' + plural(n, 'Änderung wartet', 'Änderungen warten');
+  el.title = zustand === 'ruhig'
+    ? 'Alles ist in der Tabelle. Änderungen anderer kommen alle 15 Sekunden.'
+    : zustand === 'sendet'
+      ? 'Ihre Änderungen sind schon zu sehen und werden gerade gespeichert.'
+      : 'Keine Verbindung. Die Änderungen bleiben in diesem Browser und gehen hinaus, sobald es wieder geht.';
+  el.setAttribute('aria-label', text);
+  el.dataset.zustand = zustand;
+  // In der Halle ist der Kopf schmal: dort nur der Punkt – und die Zahl, wenn etwas wartet.
+  const kurz = zustand === 'offline' ? 'Offline · ' + n : n > 1 ? String(n) : '';
+  const sichtbar = el.classList.contains('kompakt') ? kurz : text;
+  el.replaceChildren(h('span.sync-punkt'), sichtbar ? h('span.sync-text', sichtbar) : null);
+}
+
+function uhrzeit(ms) {
+  return new Date(ms).toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
+function syncDialog() {
+  if (offenerSyncDialog && !offenerSyncDialog.zu) return;
+  offenerSyncDialog = dialog({
+    titel: 'Speichern im Hintergrund',
+    inhalt: () => {
+      const liste = Sync.schlange.filter((o) => Sync.sendbar(o));
+      return [
+        h('p.klein.gedimmt', 'Was Sie ändern, steht sofort da und wird im Hintergrund in die Tabelle geschrieben. Bricht die Verbindung ab, wartet es in diesem Browser und geht hinaus, sobald es wieder geht.'),
+        liste.length
+          ? [h('div.abschnitt-titel', liste.length === 1 ? 'Eine Änderung wartet' : liste.length + ' Änderungen warten'),
+            h('ul.sync-liste', liste.map((o) => h('li', h('strong', OP_TEXT[o.name] || o.name), h('span.klein.gedimmt', 'seit ' + uhrzeit(o.zeit)),
+              (Sync.unterwegs || []).includes(o) ? h('span.badge.badge-blau', 'wird gesendet') : null)))]
+          : h('div.infobox', h('span', 'Alles gespeichert.' + (Sync.zuletzt ? ' Zuletzt abgeglichen um ' + uhrzeit(Sync.zuletzt) + '.' : ''))),
+        Sync.offline && Sync.letzterFehler ? h('p.fehlertext', 'Letzter Versuch: ' + Sync.letzterFehler) : null,
+      ];
+    },
+    fuss: (c) => {
+      const wartet = Sync.anzahl();
+      return [
+        wartet ? h('div.links', h('button.btn.btn-text', {
+          onclick: async () => {
+            if (await bestaetigen({ titel: 'Ungespeicherte Änderungen verwerfen?', text: 'Was noch nicht in der Tabelle ist, geht verloren – auch auf diesem Bildschirm.', ja: 'Verwerfen', gefahr: true })) Sync.verwerfen();
+          },
+        }, 'Verwerfen …')) : null,
+        h('button.btn', {
+          onclick: () => {
+            if (wartet) {
+              Sync.versuche = 0;
+              Sync.senden();
+            } else nachfragen(true);
+          },
+        }, wartet ? 'Jetzt senden' : 'Jetzt abgleichen'),
+        h('button.btn.btn-primary', { onclick: () => c.schliessen() }, 'Schließen'),
+      ];
+    },
+  });
+}
+
+window.addEventListener('online', () => {
+  Sync.versuche = 0;
+  Sync.senden();
+});
+
+window.addEventListener('beforeunload', (e) => {
+  // Die Schlange überlebt das Schließen – aber wer gerade bucht, soll es wissen.
+  if (!Sync.unterwegs) return;
+  e.preventDefault();
+  e.returnValue = '';
+});
+</script>

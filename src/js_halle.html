@@ -1,0 +1,515 @@
+<script>
+/**
+ * Die Fahrzeughalle: das Telefon in der Hand, Handschuhe an.
+ *
+ * Eine eigene Bedienform, aber kein eigener Weg: Gebucht wird durch dieselbe Aktion
+ * `betrieb.umlagern` wie am Schreibtisch, gezählt durch `inventur.*`, mit denselben
+ * Rechten und demselben Protokoll – und wie dort ohne Warten: Was gebucht ist, steht
+ * sofort da, die Tabelle holt im Hintergrund nach (`js_sync.html`). In einer Halle aus
+ * Stahlbeton reißt die Verbindung; dann wartet die Buchung im Telefon. Was sich unterscheidet, ist nur der Bildschirm –
+ * zwei Daumen statt Maus und dreizehn Spalten.
+ *
+ * Prüfungen werden hier bewusst NICHT erfasst: Sie tragen eine Checkliste mit
+ * Messwerten und ergeben einen Nachweis, der unterschrieben wird. Ihn am Telefon zu
+ * beginnen und woanders zu beenden, wäre die schlechteste Mischung.
+ */
+'use strict';
+
+function halleZustand() {
+  if (!Z.halle) {
+    Z.halle = {
+      umlagern: { geraete: [], schritt: 'sammeln', ziel: '', grund: '', suche: '' },
+      info: { treffer: null },
+      zaehlen: { phase: 'platz', ortId: null, gangId: null, funde: [], korrigieren: true, vermisst: true, bemerkung: '', ergebnis: null, fehlendeZeigen: false },
+      scanner: {},
+      ziel: {},
+    };
+  }
+  return Z.halle;
+}
+
+/**
+ * Der Scanner je Reiter bleibt dasselbe Element über jedes Neuzeichnen hinweg. Sonst
+ * risse jeder neue Datenstand – etwa die Abfrage im Hintergrund – die laufende Kamera ab.
+ */
+function halleScanner(name, beiCode, platzhalter) {
+  const hz = halleZustand();
+  hz.ziel[name] = beiCode;
+  if (!hz.scanner[name]) {
+    hz.scanner[name] = scanner({ id: 'scan-' + name, platzhalter: platzhalter, fokus: true, beiCode: (code) => hz.ziel[name](code) });
+  }
+  return hz.scanner[name];
+}
+
+function halleFuss(...kinder) {
+  return h('div.halle-fuss', h('div', ...kinder));
+}
+
+let ruheTimer = null;
+/** Am geteilten Gerät nach Untätigkeit abmelden – sonst bucht der nächste Trupp auf den Namen des vorigen. */
+function halleRuheUeberwachen() {
+  const ich = Z.daten && Z.daten.ich;
+  const geteilt = ich && ich.art === 'halle' && ich.geraet && ich.geraet.geteilt && ich.geraet.abmelden_nach_min > 0;
+  if (!geteilt) return;
+  if (halleRuheUeberwachen.an) return;
+  halleRuheUeberwachen.an = true;
+  const grenze = ich.geraet.abmelden_nach_min * 60 * 1000;
+  const neu = () => {
+    clearTimeout(ruheTimer);
+    ruheTimer = setTimeout(() => {
+      if (Z.daten && Z.daten.ich.art === 'halle') {
+        halleRuheUeberwachen.an = false;
+        ['pointerdown', 'keydown'].forEach((e) => document.removeEventListener(e, neu));
+        Z.halle = null;
+        abmelden();
+      }
+    }, grenze);
+  };
+  ['pointerdown', 'keydown'].forEach((e) => document.addEventListener(e, neu, { passive: true }));
+  neu();
+}
+
+function halleZeichnen(app) {
+  const hz = halleZustand();
+  const reiter = Router.teile()[1] || 'umlagern';
+  const ich = Z.daten.ich;
+  halleRuheUeberwachen();
+  document.body.classList.add('halle-aktiv');
+
+  let inhalt;
+  if (reiter === 'info') inhalt = halleInfo(hz);
+  else if (reiter === 'arbeit') inhalt = halleArbeit();
+  else if (reiter === 'zaehlen') inhalt = halleZaehlen(hz);
+  else inhalt = halleUmlagern(hz);
+
+  const tab = (pfad, name, symbol, text) => h('a.halle-tab' + (reiter === name ? '.aktiv' : ''), {
+    href: '#' + pfad,
+    onclick: (e) => {
+      e.preventDefault();
+      kameraStoppen();
+      gehe(pfad);
+    },
+  }, icon(symbol, 24), h('span', text));
+
+  mitFokus(() => {
+    app.replaceChildren(h('div.halle',
+      h('header.halle-kopf',
+        wehrLogo('marke-logo', 20),
+        h('div.halle-kopf-text', h('strong', ich.name + (ich.kuerzel ? ' · ' + ich.kuerzel : '')),
+          h('span', ich.art === 'halle' ? (ich.geraet ? ich.geraet.name : 'Hallengerät') + ' · per ' + (ich.mit === 'kuerzel' ? 'Kürzel' : 'Ausweis') : (Z.daten.wehr.name || 'Fahrzeughalle') + ' · ' + ROLLE_TEXT[ich.rolle])),
+        // Mit dem eigenen Firmenkonto (Telefon in der Tasche) geht es zurück zum Schreibtisch;
+        // am Hallengerät nur hinaus – der nächste Trupp meldet sich selbst an.
+        syncAnzeige(true),
+        ich.art === 'google'
+          ? h('button.halle-wechsel', {
+            onclick: () => {
+              kameraStoppen();
+              Ablage.schreiben('halle', false);
+              document.body.classList.remove('halle-aktiv');
+              gehe('/');
+            },
+            title: 'Zur Verwaltung',
+          }, icon('desktop', 18), h('span', 'Schreibtisch'))
+          : h('button.halle-wechsel', { onclick: () => { Z.halle = null; abmelden(); } }, icon('abmelden', 18), h('span', 'Abmelden'))),
+      h('main.halle-inhalt', inhalt),
+      h('nav.halle-tabs',
+        tab('/halle', 'umlagern', 'umlagern', 'Umlagern'),
+        tab('/halle/info', 'info', 'scan', 'Info'),
+        tab('/halle/arbeit', 'arbeit', 'aktionsliste', 'Arbeit'),
+        tab('/halle/zaehlen', 'zaehlen', 'inventur', 'Zählen'))));
+  });
+  app.dataset.ansicht = 'halle';
+  app.dataset.seite = reiter;
+}
+
+// ─────────────────────────────── Umlagern ───────────────────────────────
+
+function halleUmlagern(hz) {
+  const u = hz.umlagern;
+  // Was inzwischen gelöscht wurde, fällt still aus der Liste.
+  u.geraete = u.geraete.filter((id) => Z.idx.geraet.has(id));
+
+  const dazu = (ids) => {
+    const neu = ids.filter((id) => u.geraete.indexOf(id) < 0);
+    if (!neu.length) {
+      meldung.info('Steht schon in der Liste.');
+      return;
+    }
+    u.geraete = u.geraete.concat(neu);
+    zeichnen();
+  };
+  const gescannt = (code) => {
+    const t = aufloesen(code);
+    if (!t) {
+      piepFehler();
+      meldung.fehler(new Error('Unbekannter Code: ' + code));
+      return;
+    }
+    if (t.art === 'geraet') {
+      if (t.obj.status === 'ausgemustert') {
+        piepFehler();
+        meldung.fehler(new Error(geraetTitel(t.obj) + ' ist ausgemustert.'));
+        return;
+      }
+      piepOk();
+      dazu([t.id]);
+    } else if (t.art === 'satz') {
+      // Ein Satz-Etikett nimmt alle Teile mit – genau die Arbeit, die der Satz abnimmt.
+      const teile = t.obj.teile.filter((id) => (Z.idx.geraet.get(id) || {}).status !== 'ausgemustert');
+      if (!teile.length) {
+        meldung.info(t.obj.name + ' ist leer.');
+        return;
+      }
+      piepOk();
+      dazu(teile);
+      meldung.info(t.obj.name + ': ' + plural(teile.length, 'Teil', 'Teile') + ' übernommen.');
+    } else {
+      // Ein Lagerplatz-Etikett wird zum Ziel: An der Werkstatttür hängt ihr Code.
+      piepOk();
+      u.ziel = t.id;
+      meldung.info('Ziel: ' + t.obj.name);
+      zeichnen();
+    }
+  };
+
+  if (u.schritt === 'ziel') {
+    const orte = sortiertNachName(Z.daten.lagerplaetze).filter((o) => !u.suche || norm(o.name + ' ' + o.code).indexOf(norm(u.suche)) >= 0);
+    const gruende = Z.daten.gruende.filter((g) => g.aktiv).sort((a, b) => a.position - b.position);
+    const ziel = Z.idx.ort.get(u.ziel);
+    return [
+      h('button.halle-zurueck', { onclick: () => { u.schritt = 'sammeln'; zeichnen(); } }, '← ' + plural(u.geraete.length, 'Gerät', 'Geräte')),
+      h('h2.halle-frage', 'Wohin?'),
+      Z.daten.lagerplaetze.length > 6 ? h('input', { id: 'halle-ort-suche', value: u.suche, placeholder: 'Lagerplatz suchen', style: { fontSize: '16px', marginBottom: '10px', minHeight: '48px' }, oninput: (e) => { u.suche = e.target.value; zeichnen(); } }) : null,
+      h('div.halle-wahl', orte.map((o) => h('button.halle-wahl-knopf' + (o.id === u.ziel ? '.gewaehlt' : ''), { onclick: () => { u.ziel = o.id; zeichnen(); } },
+        h('strong', o.name), h('span', ORT_TYP_TEXT[o.typ] + ' · ' + o.code)))),
+      h('h2.halle-frage', 'Warum?'),
+      // Der Grund ist Pflicht: Er bestimmt den Zustand danach. Ein Vorgabewert trüge
+      // stillschweigend Falsches ein – „Einsatz“ heißt reinigen, „Übung“ nicht.
+      h('div.halle-wahl', gruende.map((g) => h('button.halle-wahl-knopf' + (g.id === u.grund ? '.gewaehlt' : ''), { onclick: () => { u.grund = g.id; zeichnen(); } },
+        h('strong', g.name), h('span', g.status_danach ? 'danach: ' + STATUS_TEXT[g.status_danach] : 'Zustand bleibt')))),
+      h('div', { style: { height: '90px' } }),
+      halleFuss(h('button.btn.btn-primary.halle-tat', {
+        disabled: !u.ziel || !u.grund,
+        onclick: () => {
+          // Gebucht ist sofort – gespeichert wird im Hintergrund. Wer die nächsten Geräte
+          // scannt, muss nicht auf die Tabelle warten.
+          try {
+            const r = Sync.tun('betrieb.umlagern', { geraete: u.geraete, nach: u.ziel, grund: u.grund });
+            piepOk();
+            meldung.erfolg(umlagernErgebnis(r.vorschau) + ' → ' + (Z.idx.ort.get(u.ziel) || {}).name);
+            // Ziel und Grund bleiben stehen: Der nächste Trupp kommt meist aus demselben Einsatz.
+            u.geraete = [];
+            u.schritt = 'sammeln';
+          } catch (e) {
+            piepFehler();
+            meldung.fehler(e);
+          }
+          zeichnen();
+        },
+      }, !u.ziel ? 'Ziel wählen' : !u.grund ? 'Grund wählen' : u.geraete.length + ' nach ' + ziel.name + ' buchen')),
+    ];
+  }
+
+  return [
+    halleScanner('umlagern', gescannt),
+    u.geraete.length
+      ? h('ul.halle-liste', u.geraete.slice().reverse().map((id) => {
+        const g = Z.idx.geraet.get(id);
+        return h('li',
+          h('div.halle-liste-text', h('strong', geraetTitel(g)), h('span', typName(g.geraetetyp_id) + ' · steht in ' + ortName(g.lagerplatz_id))),
+          statusBadge(g.status),
+          h('button.halle-weg', { 'aria-label': geraetTitel(g) + ' entfernen', onclick: () => { u.geraete = u.geraete.filter((x) => x !== id); zeichnen(); } }, icon('x', 20)));
+      }))
+      : h('p.halle-hinweis', 'Geräte scannen oder eintippen. Ein Satz-Etikett nimmt alle seine Teile mit, ein Lagerplatz-Etikett wird zum Ziel.'),
+    h('div', { style: { height: '110px' } }),
+    halleFuss(
+      u.ziel && Z.idx.ort.get(u.ziel) ? h('div.halle-fuss-notiz', 'Ziel steht schon: ' + Z.idx.ort.get(u.ziel).name) : null,
+      h('button.btn.btn-primary.halle-tat', { disabled: !u.geraete.length, onclick: () => { kameraStoppen(); u.schritt = 'ziel'; zeichnen(); window.scrollTo(0, 0); } },
+        u.geraete.length ? 'Weiter mit ' + plural(u.geraete.length, 'Gerät', 'Geräten') : 'Noch nichts gescannt')),
+  ];
+}
+
+// ─────────────────────────────── Info ───────────────────────────────
+
+function halleInfo(hz) {
+  const i = hz.info;
+  const gescannt = (code) => {
+    const t = aufloesen(code);
+    if (!t) {
+      piepFehler();
+      meldung.fehler(new Error('Unbekannter Code: ' + code));
+      return;
+    }
+    piepOk();
+    i.treffer = { art: t.art, id: t.id };
+    zeichnen();
+  };
+
+  let karte = h('p.halle-hinweis', 'Was ist das, wo gehört es hin, wann ist es fällig? Einfach scannen.');
+  const t = i.treffer;
+  if (t && t.art === 'geraet' && Z.idx.geraet.get(t.id)) {
+    const g = Z.idx.geraet.get(t.id);
+    const stand = (Z.idx.standVon.get(g.id) || []).filter((s) => s.aktiv).sort((a, b) => vergleich(a.naechste_faellig, b.naechste_faellig));
+    karte = h('div.halle-karte',
+      h('h2', geraetTitel(g)),
+      h('div.klein.gedimmt', typName(g.geraetetyp_id) + ' · ' + g.barcode + (g.seriennummer ? ' · SN ' + g.seriennummer : '')),
+      h('div', { style: { margin: '12px 0' } }, statusBadge(g.status), g.satz_id ? h('span.badge.badge-blau', 'Satz ' + Z.idx.satz.get(g.satz_id).name) : null),
+      h('div.detail-raster', h('div.detail-feld', h('span', 'Standort'), h('strong', ortZeile(g.lagerplatz_id)))),
+      stand.length ? [h('div.abschnitt-titel', 'Prüfungen'), stand.map((s) => {
+        const p = Z.idx.plan.get(s.pruefplan_id);
+        return h('div', { style: { display: 'flex', justifyContent: 'space-between', gap: '10px', padding: '8px 0', borderBottom: '1px solid var(--n-100)' } },
+          h('span', p ? p.name : '–'), h('span', faelligBadge(tageBis(s.naechste_faellig)), ' ', h('span.klein.gedimmt', datum(s.naechste_faellig))));
+      })] : h('p.klein.gedimmt', 'Kein Prüfplan.'),
+      g.bemerkung ? h('p.klein', { style: { whiteSpace: 'pre-line', marginTop: '12px' } }, g.bemerkung) : null,
+      h('div.knopfreihe', { style: { marginTop: '14px' } },
+        g.status !== 'ausgemustert' ? h('button.btn', {
+          onclick: () => {
+            if (hz.umlagern.geraete.indexOf(g.id) < 0) hz.umlagern.geraete.push(g.id);
+            hz.umlagern.schritt = 'sammeln';
+            gehe('/halle');
+          },
+        }, icon('umlagern', 16), 'Umlagern') : null,
+        g.status === 'zu_reinigen' ? h('button.btn.btn-primary', { onclick: () => { if (sofort('betrieb.gereinigt', { geraet: g.id }, geraetTitel(g) + ' ist einsatzbereit.')) piepOk(); } }, 'Gereinigt')
+          : null));
+  } else if (t && t.art === 'ort' && Z.idx.ort.get(t.id)) {
+    const o = Z.idx.ort.get(t.id);
+    const bestand = (Z.idx.geraeteAn.get(o.id) || []).filter((g) => g.status !== 'ausgemustert').sort((a, b) => vergleich(geraetTitel(a), geraetTitel(b)));
+    karte = h('div.halle-karte',
+      h('h2', o.name),
+      h('div.klein.gedimmt', ORT_TYP_TEXT[o.typ] + ' · ' + o.code + ' · zuletzt gezählt: ' + (o.zuletzt_gezaehlt ? datum(o.zuletzt_gezaehlt) : 'noch nie')),
+      h('div.abschnitt-titel', { style: { marginTop: '14px' } }, 'Hier laut Bestand: ' + bestand.length),
+      bestand.map((g) => h('div', { style: { display: 'flex', justifyContent: 'space-between', gap: '10px', padding: '8px 0', borderBottom: '1px solid var(--n-100)' } },
+        h('span', h('strong', geraetTitel(g)), h('span.klein.gedimmt', ' ' + typName(g.geraetetyp_id))), statusBadge(g.status))),
+      h('p.klein.gedimmt', { style: { marginTop: '12px' } }, 'Ob das stimmt, sagt ein Zählgang – Reiter „Zählen“.'));
+  } else if (t && t.art === 'satz' && Z.idx.satz.get(t.id)) {
+    const s = Z.idx.satz.get(t.id);
+    karte = h('div.halle-karte',
+      h('h2', s.name),
+      h('div', { style: { margin: '10px 0' } }, vollstBadge(s.vollstaendigkeit), s.verteilt ? h('span.badge.badge-gelb', 'verteilt') : null),
+      s.fehlt.length ? h('p.klein', 'Es fehlt: ' + s.fehlt.map((f) => typName(f.geraetetyp_id) + ' (' + f.ist + ' von ' + f.soll + ')').join(', ')) : null,
+      s.teile.map((id) => {
+        const g = Z.idx.geraet.get(id);
+        return h('div', { style: { display: 'flex', justifyContent: 'space-between', gap: '10px', padding: '8px 0', borderBottom: '1px solid var(--n-100)' } },
+          h('span', h('strong', geraetTitel(g)), h('span.klein.gedimmt', ' ' + ortName(g.lagerplatz_id))), statusBadge(g.status));
+      }));
+  }
+  return [halleScanner('info', gescannt), karte];
+}
+
+// ─────────────────────────────── Arbeit ───────────────────────────────
+
+function halleArbeit() {
+  const technik = istTechnik();
+  const zustaende = Z.daten.arbeitsliste.filter((a) => a.art !== 'pruefung');
+  const pruefungen = Z.daten.arbeitsliste.filter((a) => a.art === 'pruefung' && a.tage <= 0).sort((a, b) => a.tage - b.tage);
+  const erledigen = (a) => {
+    if (zustandErledigen(a)) piepOk();
+    else piepFehler();
+  };
+  return [
+    h('h2.halle-frage', 'Zu reinigen und zu reparieren'),
+    zustaende.length ? h('ul.halle-liste', zustaende.map((a) => {
+      const g = Z.idx.geraet.get(a.geraet_id);
+      const darfHier = a.art === 'reinigung' || technik;
+      return h('li',
+        h('div.halle-liste-text', h('strong', geraetTitel(g)), h('span', typName(g.geraetetyp_id) + ' · ' + ortName(g.lagerplatz_id))),
+        darfHier
+          ? h('button.btn.btn-primary', { style: { minHeight: '48px' }, onclick: () => erledigen(a) }, a.art === 'reinigung' ? 'Gereinigt' : 'Instandgesetzt')
+          : h('span.badge.badge-rot', 'defekt'));
+    })) : h('p.halle-hinweis', 'Nichts zu reinigen, nichts defekt.'),
+    pruefungen.length ? [
+      h('h2.halle-frage', 'Fällige Prüfungen'),
+      h('p.klein.gedimmt', 'Prüfungen werden am Schreibtisch erfasst – mit Checkliste und Nachweis.'),
+      h('ul.halle-liste', pruefungen.map((a) => {
+        const g = Z.idx.geraet.get(a.geraet_id);
+        const p = Z.idx.plan.get(a.plan_id);
+        return h('li', h('div.halle-liste-text', h('strong', geraetTitel(g)), h('span', (p ? p.name : '') + ' · ' + ortName(g.lagerplatz_id))), faelligBadge(a.tage));
+      })),
+    ] : null,
+  ];
+}
+
+// ─────────────────────────────── Zählen ───────────────────────────────
+
+function halleZaehlen(hz) {
+  const zz = hz.zaehlen;
+  const merken = () => Ablage.schreiben('inventur.' + zz.gangId, zz.funde);
+
+  /*
+   * Beginnen geht sofort: Den Gang legt der Browser mit eigener Kennung an, der Server
+   * übernimmt sie. Hat dort inzwischen jemand anders an diesem Platz begonnen, antwortet
+   * er mit dessen Gang – dann zählt man in den hinein, die Fundliste zieht mit um.
+   */
+  const beginnen = (ortId) => {
+    try {
+      const r = Sync.tun('inventur.beginnen', { lagerplatz: ortId, neu_id: neueId() });
+      const id = r.vorschau.id;
+      zz.ortId = ortId;
+      zz.gangId = id;
+      // Eine wacklige Verbindung oder ein Neuladen soll die Fundliste nicht kosten.
+      zz.funde = Ablage.lesen('inventur.' + id, []) || [];
+      zz.phase = 'zaehlen';
+      zz.ergebnis = null;
+      zz.bemerkung = '';
+      if (r.vorschau.fortgesetzt) meldung.info('Ein offener Zählgang von hier wird fortgesetzt.');
+      r.bestaetigt.then((x) => {
+        if (!x.ok || !x.ergebnis || x.ergebnis.id === id || zz.gangId !== id) return;
+        zz.gangId = x.ergebnis.id;
+        zz.funde = zz.funde.concat((Ablage.lesen('inventur.' + x.ergebnis.id, []) || []).filter((f) => zz.funde.indexOf(f) < 0));
+        Ablage.entfernen('inventur.' + id);
+        merken();
+        meldung.info('An diesem Platz zählte schon jemand – Ihre Funde gehen in diesen Zählgang.');
+        zeichnen();
+      });
+      zeichnen();
+    } catch (e) {
+      meldung.fehler(e);
+    }
+  };
+
+  if (zz.phase === 'platz') {
+    const offen = new Set(Z.daten.inventurenOffen.map((i) => i.lagerplatz_id));
+    const gescannt = (code) => {
+      const t = aufloesen(code);
+      if (t && t.art === 'ort') {
+        piepOk();
+        beginnen(t.id);
+      } else {
+        piepFehler();
+        meldung.fehler(new Error('Zuerst das Etikett des Lagerplatzes scannen – oder unten wählen.'));
+      }
+    };
+    return [
+      h('h2.halle-frage', 'Wo wird gezählt?'),
+      halleScanner('zaehlen-platz', gescannt, 'Lagerplatz-Etikett scannen'),
+      h('div.halle-wahl', { style: { marginTop: '14px' } }, sortiertNachName(Z.daten.lagerplaetze).map((o) => h('button.halle-wahl-knopf', { onclick: () => beginnen(o.id) },
+        h('strong', o.name),
+        h('span', offen.has(o.id) ? 'offener Gang – fortsetzen' : 'zuletzt: ' + (o.zuletzt_gezaehlt ? datum(o.zuletzt_gezaehlt) : 'noch nie'))))),
+    ];
+  }
+
+  const ort = Z.idx.ort.get(zz.ortId);
+  if (!ort) {
+    zz.phase = 'platz';
+    return h('p.halle-hinweis', 'Diesen Lagerplatz gibt es nicht mehr.');
+  }
+
+  if (zz.phase === 'fertig' && zz.ergebnis) {
+    const r = zz.ergebnis;
+    const zeile = (id, zusatz) => {
+      const g = Z.idx.geraet.get(id);
+      return h('li', h('div.halle-liste-text', h('strong', geraetTitel(g)), h('span', typName(g.geraetetyp_id) + (zusatz ? ' · ' + zusatz : ''))));
+    };
+    return [
+      h('h2.halle-frage', 'Befund: ' + ort.name),
+      // Kein grüner Haken, wenn etwas fehlt: Ein Abschluss ist ein Befund, kein Erfolg.
+      h('div.halle-zahlen',
+        h('div.gut', h('strong', r.gefunden.length), h('span', 'gefunden')),
+        h('div' + (r.fehlt.length ? '.schlecht' : ''), h('strong', r.fehlt.length), h('span', 'fehlen')),
+        h('div', h('strong', r.fremd.length), h('span', 'waren fremd'))),
+      r.fehlt.length ? [h('div.abschnitt-titel', 'Fehlt' + (r.vermisstGebucht ? ' – nach „Vermisst“ gebucht' : ' – bleibt im Bestand stehen')),
+        h('ul.halle-liste', r.fehlt.map((id) => zeile(id)))] : null,
+      r.fremd.length ? [h('div.abschnitt-titel', zz.korrigieren ? 'War fremd – hierher gebucht' : 'War fremd'),
+        h('ul.halle-liste', r.fremd.map((id) => zeile(id)))] : null,
+      h('div', { style: { height: '90px' } }),
+      halleFuss(h('button.btn.btn-primary.halle-tat', { onclick: () => { zz.phase = 'platz'; zz.ergebnis = null; zeichnen(); } }, 'Nächster Platz')),
+    ];
+  }
+
+  const soll = (Z.idx.geraeteAn.get(ort.id) || []).filter((g) => g.status !== 'ausgemustert');
+  const sollIds = new Set(soll.map((g) => g.id));
+  const hier = zz.funde.filter((id) => sollIds.has(id)).length;
+  const fremd = zz.funde.filter((id) => !sollIds.has(id) && (Z.idx.geraet.get(id) || {}).lagerplatz_id !== ort.id).length;
+  const fehlend = soll.filter((g) => zz.funde.indexOf(g.id) < 0);
+  const vermisstCode = Z.daten.einstellungen.inventur_vermisst_code;
+
+  const gescannt = (code) => {
+    const t = aufloesen(code);
+    let neue = [];
+    if (t && t.art === 'geraet') neue = [t.id];
+    else if (t && t.art === 'satz') neue = t.obj.teile.slice();
+    else if (t && t.art === 'ort') {
+      piepFehler();
+      meldung.info('Ein Lagerplatz-Etikett – gezählt werden Geräte.');
+      return;
+    } else {
+      piepFehler();
+      meldung.fehler(new Error('Unbekannter Code: ' + code));
+      return;
+    }
+    const frisch = neue.filter((id) => zz.funde.indexOf(id) < 0);
+    if (!frisch.length) {
+      meldung.info('Schon gezählt.');
+      return;
+    }
+    piepOk();
+    zz.funde = zz.funde.concat(frisch);
+    merken();
+    zeichnen();
+  };
+
+  if (zz.phase === 'abschluss') {
+    return [
+      h('button.halle-zurueck', { onclick: () => { zz.phase = 'zaehlen'; zeichnen(); } }, '← weiter zählen'),
+      h('h2.halle-frage', ort.name + ' abschließen'),
+      h('div.halle-zahlen',
+        h('div', h('strong', hier), h('span', 'von ' + soll.length + ' gefunden')),
+        h('div' + (fehlend.length ? '.schlecht' : ''), h('strong', fehlend.length), h('span', 'fehlen')),
+        h('div', h('strong', fremd), h('span', 'fremd'))),
+      fremd ? haken(zz, 'korrigieren', 'Fremde Geräte hierher buchen (Grund „Inventur“)') : null,
+      fehlend.length && vermisstCode ? haken(zz, 'vermisst', 'Fehlende Geräte nach „' + ((Z.daten.lagerplaetze.find((l) => l.code === vermisstCode) || {}).name || vermisstCode) + '“ buchen') : null,
+      feld('Bemerkung', textfeld(zz, 'bemerkung', { rows: 2, placeholder: 'optional, z. B. „Fach 3 nicht zugänglich“' })),
+      h('p.klein.gedimmt', 'Ein Zählergebnis ist ein Nachweis und lässt sich danach nicht mehr ändern.'),
+      h('div', { style: { height: '90px' } }),
+      halleFuss(h('button.btn.btn-primary.halle-tat', {
+        onclick: () => {
+          try {
+            // Der Befund steht sofort da – gerechnet mit `inventurBefund_`, wie gleich der
+            // Server. Kommt seiner an, ersetzt er diesen: Er ist der Nachweis.
+            const gang = zz.gangId;
+            const r = Sync.tun('inventur.abschliessen', { id: gang, gefunden: zz.funde, korrigieren: !!zz.korrigieren && fremd > 0, vermisst: !!zz.vermisst && !!vermisstCode, bemerkung: zz.bemerkung });
+            Ablage.entfernen('inventur.' + gang);
+            zz.ergebnis = r.vorschau;
+            zz.phase = 'fertig';
+            zz.funde = [];
+            r.bestaetigt.then((x) => {
+              if (x.ok && x.ergebnis && zz.ergebnis && zz.ergebnis.id === x.ergebnis.id) {
+                zz.ergebnis = x.ergebnis;
+                if (Router.teile()[1] === 'zaehlen') zeichnen();
+              }
+            });
+          } catch (e) {
+            meldung.fehler(e);
+          }
+          zeichnen();
+        },
+      }, 'Zählung abschließen')),
+    ];
+  }
+
+  return [
+    h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: '10px' } },
+      h('h2.halle-frage', ort.name),
+      h('button.halle-zurueck', { onclick: () => { kameraStoppen(); zz.phase = 'platz'; zeichnen(); } }, 'Platz wechseln')),
+    h('div.halle-zahlen',
+      h('div', h('strong', hier), h('span', 'von ' + soll.length)),
+      h('div' + (fehlend.length ? '' : '.gut'), h('strong', fehlend.length), h('span', 'noch offen')),
+      h('div', h('strong', fremd), h('span', 'fremd'))),
+    halleScanner('zaehlen', gescannt),
+    zz.funde.length ? h('ul.halle-liste', zz.funde.slice().reverse().map((id) => {
+      const g = Z.idx.geraet.get(id);
+      if (!g) return null;
+      const istFremd = !sollIds.has(id) && g.lagerplatz_id !== ort.id;
+      return h('li',
+        h('div.halle-liste-text', h('strong', geraetTitel(g)), h('span', istFremd ? 'fremd – laut Bestand in ' + ortName(g.lagerplatz_id) : typName(g.geraetetyp_id))),
+        istFremd ? h('span.badge.badge-gelb', 'fremd') : h('span.badge.badge-gruen', '✓'),
+        h('button.halle-weg', { 'aria-label': 'Wieder entfernen', onclick: () => { zz.funde = zz.funde.filter((x) => x !== id); merken(); zeichnen(); } }, icon('x', 18)));
+    })) : h('p.halle-hinweis', 'Alles scannen, was hier liegt. Was fehlt und was fremd ist, rechnet die Anwendung.'),
+    fehlend.length ? h('div', { style: { marginTop: '14px' } },
+      h('button.btn.btn-klein', { onclick: () => { zz.fehlendeZeigen = !zz.fehlendeZeigen; zeichnen(); } }, (zz.fehlendeZeigen ? 'Ausblenden: ' : 'Noch nicht gefunden: ') + fehlend.length),
+      zz.fehlendeZeigen ? h('ul.halle-liste', fehlend.map((g) => h('li', h('div.halle-liste-text', h('strong', geraetTitel(g)), h('span', typName(g.geraetetyp_id) + ' · ' + g.barcode))))) : null) : null,
+    h('div', { style: { height: '110px' } }),
+    halleFuss(h('button.btn.btn-primary.halle-tat', { onclick: () => { kameraStoppen(); zz.phase = 'abschluss'; zeichnen(); window.scrollTo(0, 0); } }, 'Zählung abschließen …')),
+  ];
+}
+</script>

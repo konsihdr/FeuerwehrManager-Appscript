@@ -1,0 +1,1265 @@
+<script>
+/**
+ * Der Schreibtisch: Seitenleiste, Kopfzeile und die Seiten der Verwaltung.
+ *
+ * Die Seitenleiste zeigt jeder Rolle ihren Ausschnitt. Verlassen darf man sich darauf
+ * nicht – der Schutz sitzt in `10_Tuer.js` auf dem Server. Hier geht es darum,
+ * niemandem eine Tür zu zeigen, die für ihn verschlossen ist.
+ */
+'use strict';
+
+const NAV = [
+  {
+    titel: 'Betrieb',
+    eintraege: [
+      { seite: '', symbol: 'aktionsliste', titel: 'Aktionsliste', zahl: true },
+      { seite: 'geraete', symbol: 'geraet', titel: 'Geräte' },
+      { seite: 'saetze', symbol: 'satz', titel: 'Gerätesätze' },
+    ],
+  },
+  {
+    titel: 'Stammdaten',
+    eintraege: [
+      { seite: 'typen', symbol: 'typ', titel: 'Gerätetypen & Prüfpläne', rollen: TECHNIK },
+      { seite: 'lagerplaetze', symbol: 'lager', titel: 'Lagerplätze', rollen: TECHNIK },
+      { seite: 'gruende', symbol: 'umlagern', titel: 'Umlagerungsgründe', rollen: TECHNIK },
+      { seite: 'etiketten', symbol: 'etikett', titel: 'Etiketten' },
+    ],
+  },
+  {
+    titel: 'Personal',
+    eintraege: [
+      { seite: 'personal', symbol: 'atemschutz', titel: 'Atemschutz & Nachweise', rollen: PERSONAL, modul: 'personal', zahl: 'personal' },
+      { seite: 'einsaetze', symbol: 'einsatz', titel: 'Einsätze & Stunden', rollen: PERSONAL, modul: 'personal' },
+      { seite: 'qualifikationen', symbol: 'qualifikation', titel: 'Qualifikationsarten', rollen: PERSONAL, modul: 'personal' },
+    ],
+  },
+  {
+    titel: 'Verwaltung',
+    eintraege: [
+      { seite: 'mitglieder', symbol: 'mitglieder', titel: 'Mitglieder' },
+      { seite: 'protokoll', symbol: 'protokoll', titel: 'Protokoll', rollen: VERWALTUNG },
+      { seite: 'import', symbol: 'importexport', titel: 'Import & Export', rollen: TECHNIK },
+      { seite: 'regeln', symbol: 'regeln', titel: 'Regeln', rollen: TECHNIK },
+      { seite: 'einstellungen', symbol: 'einstellungen', titel: 'Einstellungen' },
+    ],
+  },
+];
+
+const SEITEN = {
+  '': () => seiteAktionsliste(),
+  geraete: (p) => seiteGeraete(p),
+  saetze: (p) => seiteSaetze(p),
+  typen: (p) => seiteTypen(p),
+  lagerplaetze: () => seiteLagerplaetze(),
+  gruende: () => seiteGruende(),
+  etiketten: () => seiteEtiketten(),
+  mitglieder: () => seiteMitglieder(),
+  personal: (p) => seitePersonal(p),
+  einsaetze: (p) => seiteEinsaetze(p),
+  qualifikationen: () => seiteQualifikationen(),
+  protokoll: () => seiteProtokoll(),
+  import: () => seiteImport(),
+  regeln: () => seiteRegeln(),
+  einstellungen: () => seiteEinstellungen(),
+};
+
+const UEBERLAGERT = '(max-width: 1100px)';
+
+function leisteOffen() {
+  if (Z.leiste === undefined) Z.leiste = window.matchMedia(UEBERLAGERT).matches ? false : Ablage.lesen('leiste', true);
+  return Z.leiste;
+}
+
+function schreibtischZeichnen(app) {
+  const teile = Router.teile();
+  // Dialoge, die an der Adresse hängen, gehen mit ihr – auch beim Zurück-Knopf.
+  if (offeneAkte && !offeneAkte.zu && offeneAkte.ausAdresse && !(teile[0] === 'geraete' && teile[1] === offeneAkte.geraetId)) offeneAkte.schliessen();
+  if (offenerSatz && !offenerSatz.zu && !(teile[0] === 'saetze' && teile[1] === offenerSatz.satzId)) offenerSatz.schliessen();
+  if (offenePersonalakte && !offenePersonalakte.zu && offenePersonalakte.ausAdresse && !(teile[0] === 'personal' && teile[1] === offenePersonalakte.mitgliedId)) offenePersonalakte.schliessen();
+  if (offenerEinsatz && !offenerEinsatz.zu && offenerEinsatz.ausAdresse && !(teile[0] === 'einsaetze' && teile[1] === offenerEinsatz.einsatzId)) offenerEinsatz.schliessen();
+  const seite = SEITEN[teile[0] || ''] ? teile[0] || '' : '';
+  const eintrag = NAV.flatMap((g) => g.eintraege).find((e) => e.seite === seite);
+  if (eintrag && !navSichtbar(eintrag)) {
+    gehe('/', true);
+    return;
+  }
+  const ueberlagert = window.matchMedia(UEBERLAGERT).matches;
+  const offen = leisteOffen();
+  const k = Z.daten.kennzahlen;
+  const p = Z.daten.personal;
+  const zahlen = { true: k.ueberfaellig + k.bald, personal: p ? p.abgelaufen + p.bald : 0 };
+  const ich = Z.daten.ich;
+  const thema = Ablage.lesen('thema', 'system');
+
+  const umschalten = () => {
+    Z.leiste = !offen;
+    if (!ueberlagert) Ablage.schreiben('leiste', Z.leiste);
+    zeichnen();
+  };
+
+  const leiste = h('aside.seitenleiste',
+    h('div.marke', wehrLogo('marke-logo', 22),
+      h('span.marke-text', h('span.marke-titel', Z.daten.wehr.name || 'FeuerwehrManager'), h('span.marke-untertitel', Z.daten.wehr.zusatz || 'Lager & Prüfwesen'))),
+    h('nav.nav', NAV.map((g) => {
+      const sichtbar = g.eintraege.filter(navSichtbar);
+      if (!sichtbar.length) return null;
+      return [h('div.nav-gruppe', g.titel), sichtbar.map((e) => h('a' + (e.seite === seite ? '.aktiv' : ''), {
+        href: '#/' + e.seite,
+        onclick: (ev) => {
+          ev.preventDefault();
+          if (ueberlagert) Z.leiste = false;
+          gehe('/' + e.seite);
+        },
+      }, h('span.nav-symbol', icon(e.symbol, 19)), h('span', e.titel), e.zahl && zahlen[e.zahl] ? h('span.nav-zahl', zahlen[e.zahl]) : null))];
+    })),
+    h('div.seitenleiste-fuss', 'FeuerwehrManager ' + Z.daten.version + ' · Apps Script'));
+
+  const kopf = h('header.kopfzeile',
+    h('button.btn.btn-klein', { onclick: umschalten, 'aria-label': offen ? 'Menü zuklappen' : 'Menü aufklappen', title: 'Menü' }, icon(ueberlagert && offen ? 'x' : 'menue', 17)),
+    h('span.kopf-marke', Z.daten.wehr.name || 'FeuerwehrManager'),
+    h('span.kopf-raum'),
+    syncAnzeige(),
+    // Kein „Abmelden“: Angemeldet ist das Firmenkonto bei Google, nicht diese Anwendung.
+    h('div.benutzer-chip', { title: ich.name + ' · ' + ROLLE_TEXT[ich.rolle] + ' · ' + ich.email },
+      h('span.benutzer-avatar', initialen(ich.name)),
+      h('span.benutzer-text', h('div.benutzer-name', ich.name), h('div.benutzer-rolle', ROLLE_TEXT[ich.rolle]))),
+    h('button.btn.btn-klein', {
+      onclick: () => {
+        Ablage.schreiben('halle', true);
+        gehe('/halle');
+      },
+      title: 'Ansicht für die Fahrzeughalle: große Knöpfe, Kamera als Scanner',
+    }, icon('halle', 15), h('span.kopf-text-knopf', 'Halle')),
+    h('button.btn.btn-klein', { onclick: themaWechseln, title: 'Thema: ' + { system: 'wie das System', light: 'hell', dark: 'dunkel' }[thema], 'aria-label': 'Thema wechseln' },
+      icon({ system: 'automatisch', light: 'sonne', dark: 'mond' }[thema], 15)));
+
+  const inhalt = h('main.inhalt');
+  const y = window.scrollY;
+  const gleicheSeite = app.dataset.seite === seite && app.dataset.ansicht === 'schreibtisch';
+  inhalt.append(...flach(SEITEN[seite](teile[1] || null)));
+  mitFokus(() => {
+    app.replaceChildren(h('div.admin' + (offen ? '.leiste-offen' : '.leiste-zu') + (ueberlagert ? '.leiste-ueberlagert' : ''),
+      ueberlagert && offen ? h('div.leisten-schatten', { onclick: umschalten }) : null,
+      leiste,
+      h('div.hauptbereich', kopf, inhalt)));
+  });
+  app.dataset.ansicht = 'schreibtisch';
+  app.dataset.seite = seite;
+  if (gleicheSeite) window.scrollTo(0, y);
+}
+
+/** Zeigt die Seitenleiste diesen Eintrag – nach Rolle und eingeschaltetem Modul? */
+function navSichtbar(e) {
+  if (e.rollen && !darf.apply(null, e.rollen)) return false;
+  return !e.modul || !!(Z.daten.module && Z.daten.module[e.modul] && (e.modul !== 'personal' || Z.daten.nachweise));
+}
+
+/**
+ * Eine Hallensitzung beenden (Ausweis/Kürzel). Am Schreibtisch gibt es nichts abzumelden.
+ *
+ * Erst wird gespeichert, was noch unterwegs ist – unter dem Namen dessen, der es
+ * gebucht hat. Geht das gerade nicht (keine Verbindung), bleibt seine Sitzung auf dem
+ * Server offen, bis sie von selbst abläuft: Die Änderungen tragen ihr Token und gehen
+ * hinaus, sobald es wieder Verbindung gibt – auch wenn bis dahin schon der Nächste
+ * angemeldet ist.
+ */
+async function abmelden() {
+  const token = Z.token;
+  await Sync.abwarten();
+  const offen = Sync.schlange.filter((o) => o.token === token).length;
+  if (!offen) {
+    try {
+      await api('sitzung.abmelden', {}, { sofort: true });
+    } catch (e) {
+      // Abgemeldet ist man so oder so.
+    }
+  }
+  sitzungVerloren(offen ? plural(offen, 'Änderung wird', 'Änderungen werden') + ' nachgereicht, sobald wieder Verbindung besteht.' : '');
+}
+
+function werkzeugleiste(titel, untertitel, knoepfe) {
+  return h('div.werkzeugleiste',
+    h('div', h('h1', titel), untertitel ? h('div.untertitel', untertitel) : null),
+    h('div.knopfreihe', flach(knoepfe)));
+}
+
+function knopf(text, symbol, klick, klasse) {
+  return h('button.btn' + (klasse ? '.' + klasse : ''), { onclick: klick }, symbol ? icon(symbol, 16) : null, text);
+}
+
+// ─────────────────────────────── Aktionsliste ───────────────────────────────
+
+const AUFGABE = {
+  pruefung: { titel: 'Prüfung', knopf: 'Prüfung erfassen' },
+  reinigung: { titel: 'Reinigen', erklaerung: 'nach Einsatz – wieder einsatzbereit machen', knopf: 'Gereinigt' },
+  reparatur: { titel: 'Reparatur', erklaerung: 'als defekt gemeldet', knopf: 'Instandgesetzt' },
+};
+
+function zustandErledigen(a) {
+  const g = Z.idx.geraet.get(a.geraet_id);
+  return a.art === 'reinigung'
+    ? sofort('betrieb.gereinigt', { geraet: g.id }, geraetTitel(g) + ' ist wieder einsatzbereit.')
+    : sofort('betrieb.statusSetzen', { geraete: [g.id], status: 'einsatzbereit' }, geraetTitel(g) + ' ist wieder einsatzbereit.');
+}
+
+function seiteAktionsliste() {
+  const z = ui('aktionsliste', { tage: null, sortiert: 'faellig' });
+  const k = Z.daten.kennzahlen;
+  const zeitraum = z.tage === null ? k.vorwarnung : z.tage;
+  const liste = Z.daten.arbeitsliste.filter((a) => a.art !== 'pruefung' || a.tage <= zeitraum);
+  const ueberfaellig = liste.filter((a) => a.ueberfaellig).length;
+  const ohneTermin = liste.filter((a) => a.art !== 'pruefung').length;
+  const technik = istTechnik();
+  const personal = istPersonal() ? Z.daten.personal : null;
+  const zuGeraeten = (status) => () => {
+    Object.assign(ui('geraete', {}), { status: status, ausgemustert: false });
+    gehe('/geraete');
+  };
+
+  const kachel = (wert, titel, art, klick) => h(klick ? 'button.kachel' : 'div.kachel', { class: art || '', onclick: klick || null },
+    h('div.kachel-wert', String(wert)), h('div.kachel-titel', titel));
+
+  return [
+    werkzeugleiste('Aktionsliste', null, [
+      h('select', {
+        id: 'zeitraum',
+        style: { width: 'auto' },
+        onchange: (e) => {
+          z.tage = Number(e.target.value);
+          zeichnen();
+        },
+      }, [[0, 'Nur überfällige'], [7, 'Fällig in 7 Tagen'], [k.vorwarnung, 'Fällig in ' + k.vorwarnung + ' Tagen (Vorgabe)'], [90, 'Fällig in 90 Tagen'], [365, 'Fällig in einem Jahr']]
+        .filter((o, i, alle) => alle.findIndex((x) => x[0] === o[0]) === i)
+        .map((o) => h('option', { value: o[0], selected: o[0] === zeitraum }, o[1]))),
+    ]),
+    h('div.kacheln',
+      kachel(k.ueberfaellig, 'Überfällige Prüfungen', k.ueberfaellig ? 'warnung' : 'gut'),
+      kachel(k.bald, 'Fällig in ' + k.vorwarnung + ' Tagen', k.bald ? 'hinweis' : ''),
+      kachel(k.geraete, 'Geräte im Dienst', '', () => gehe('/geraete')),
+      kachel(k.zu_reinigen, 'Zu reinigen', k.zu_reinigen ? 'hinweis' : '', zuGeraeten('zu_reinigen')),
+      kachel(k.zur_pruefung, 'In der Werkstatt', '', zuGeraeten('zur_pruefung')),
+      kachel(k.defekt, 'Defekt', k.defekt ? 'warnung' : '', zuGeraeten('defekt')),
+      kachel(k.saetzeUnvollstaendig, 'Unvollständige Sätze' + (k.saetzeAbweichend ? ' · ' + k.saetzeAbweichend + ' abweichend' : ''),
+        k.saetzeUnvollstaendig ? 'warnung' : '', () => gehe('/saetze')),
+      personal ? kachel(personal.tauglich + ' / ' + personal.traeger, 'Atemschutztauglich', personal.tauglich < personal.traeger ? 'hinweis' : 'gut', () => gehe('/personal')) : null,
+      personal ? kachel(personal.abgelaufen, 'Nachweise abgelaufen', personal.abgelaufen ? 'warnung' : 'gut', () => gehe('/personal')) : null),
+    k.ohnePlan ? h('div.hinweisbox',
+      h('span', h('strong', String(k.ohnePlan)), ' ', k.ohnePlan === 1 ? 'Gerät hat keinen aktiven Prüfplan' : 'Geräte haben keinen aktiven Prüfplan',
+        ' – sie stehen in keiner Fälligkeitsliste und werden nie erinnert.'),
+      istTechnik() ? h('button.btn.btn-klein', { onclick: () => gehe('/typen') }, 'Gerätetypen öffnen') : null) : null,
+    k.saetzeUnvollstaendig || k.saetzeAbweichend ? h('div.fehlerbox',
+      h('span', k.saetzeUnvollstaendig ? plural(k.saetzeUnvollstaendig, 'Gerätesatz ist', 'Gerätesätze sind') + ' nicht vollständig – es fehlen Teile. ' : '',
+        k.saetzeAbweichend ? plural(k.saetzeAbweichend, 'Satz weicht', 'Sätze weichen') + ' von der Vorlage ab.' : ''),
+      h('button.btn.btn-klein', { onclick: () => gehe('/saetze') }, 'Gerätesätze ansehen')) : null,
+    h('div.karte',
+      h('div.karte-kopf',
+        h('h2', 'Anstehende Arbeiten ', h('span.klein.gedimmt', { style: { fontWeight: 400 } },
+          '(' + plural(liste.length, 'Vorgang', 'Vorgänge') + (ueberfaellig ? ', davon ' + ueberfaellig + ' überfällig' : '') + (ohneTermin ? ' · ' + ohneTermin + ' ohne Termin' : '') + ')')),
+        h('div.knopfreihe',
+          technik && liste.length ? h('button.btn.btn-klein', {
+            title: 'Zum Mitnehmen in die Werkstatt – mit Kästchen zum Abhaken',
+            onclick: (e) => {
+              e.currentTarget.disabled = true;
+              pdfHolen('arbeitsliste.pdf', { tage: zeitraum }).catch(meldung.fehler.bind(meldung));
+            },
+          }, icon('drucken', 14), 'Arbeitsliste als PDF') : null,
+          h('button.btn.btn-klein', { onclick: () => nachfragen(true), title: 'Änderungen anderer kommen von selbst alle 15 Sekunden' }, 'Aktualisieren'))),
+      tabelle({
+        zustand: z,
+        schluessel: (a) => a.id,
+        zeilen: liste,
+        leer: 'Nichts zu tun: keine fälligen Prüfungen, nichts zu reinigen, nichts defekt.',
+        klick: (a) => akteDialog(a.geraet_id),
+        spalten: [
+          { id: 'faellig', titel: 'Fälligkeit', wert: (a) => (a.art === 'pruefung' ? a.tage : -99999), zelle: (a) => (a.art === 'pruefung'
+            ? [faelligBadge(a.tage), h('div.klein.gedimmt', datum(a.faellig)), a.werkstatt && !a.ueberfaellig ? h('div.klein', { style: { color: 'var(--gelb-600)' } }, 'wartet in der Werkstatt') : null]
+            : [h('span.badge.' + (a.art === 'reparatur' ? 'badge-rot' : 'badge-blau'), 'sofort'), h('div.klein.gedimmt', 'kein Termin – Zustand')]) },
+          { id: 'aufgabe', titel: 'Aufgabe', wert: (a) => (a.art === 'pruefung' ? (Z.idx.plan.get(a.plan_id) || {}).name : AUFGABE[a.art].titel), zelle: (a) => {
+            const p = a.art === 'pruefung' ? Z.idx.plan.get(a.plan_id) : null;
+            return [h('strong', p ? p.name : AUFGABE[a.art].titel), h('div.klein.gedimmt', p ? intervallText(a.intervall_wert, a.intervall_einheit) : AUFGABE[a.art].erklaerung)];
+          } },
+          { id: 'geraet', titel: 'Gerät', wert: (a) => geraetTitel(Z.idx.geraet.get(a.geraet_id)), zelle: (a) => {
+            const g = Z.idx.geraet.get(a.geraet_id);
+            return [h('strong', geraetTitel(g)), h('div.klein.gedimmt', (g.bezeichnung ? typName(g.geraetetyp_id) + ' · ' : ''), h('span.mono', g.barcode))];
+          } },
+          { id: 'ort', titel: 'Standort', wert: (a) => ortName(Z.idx.geraet.get(a.geraet_id).lagerplatz_id), zelle: (a) => ortZeile(Z.idx.geraet.get(a.geraet_id).lagerplatz_id) },
+          { id: 'status', titel: 'Status', wert: (a) => Z.idx.geraet.get(a.geraet_id).status, zelle: (a) => statusBadge(Z.idx.geraet.get(a.geraet_id).status) },
+          { id: 'zuletzt', titel: 'Zuletzt', wert: (a) => a.zuletzt, zelle: (a) => h('span.klein', datum(a.zuletzt)) },
+        ],
+        aktion: (a) => {
+          if (a.art === 'pruefung') return technik ? h('button.btn.btn-klein.btn-primary', { onclick: () => pruefungDialog(a.geraet_id, a.plan_id) }, 'Prüfung erfassen') : null;
+          if (a.art === 'reparatur' && !technik) return null;
+          return h('button.btn.btn-klein.btn-primary', { onclick: () => zustandErledigen(a) }, AUFGABE[a.art].knopf);
+        },
+      })),
+    personal ? nachweiseKarte(personal) : null,
+  ];
+}
+
+// ─────────────────────────────── Geräte ───────────────────────────────
+
+function geraeteGefiltert(z) {
+  const t = norm(z.suche);
+  return Z.daten.geraete.filter((g) => {
+    if (!z.ausgemustert && g.status === 'ausgemustert' && z.status !== 'ausgemustert') return false;
+    if (z.status && g.status !== z.status) return false;
+    if (z.typ && g.geraetetyp_id !== z.typ) return false;
+    if (z.ort && g.lagerplatz_id !== z.ort) return false;
+    if (t && norm([g.bezeichnung, g.barcode, g.seriennummer, typName(g.geraetetyp_id), ortName(g.lagerplatz_id), g.bemerkung].join(' ')).indexOf(t) < 0) return false;
+    return true;
+  });
+}
+
+function seiteGeraete(param) {
+  const z = ui('geraete', { suche: '', status: '', typ: '', ort: '', ausgemustert: false, gewaehlt: new Set(), sortiert: 'geraet' });
+  if (!z.gewaehlt) z.gewaehlt = new Set();
+  const technik = istTechnik();
+
+  // Die Akte folgt der Adresse – öffnen, wenn sie darin steht; schließen, wenn nicht mehr.
+  if (param && Z.idx.geraet.has(param)) {
+    if (!offeneAkte || offeneAkte.zu || offeneAkte.geraetId !== param) {
+      setTimeout(() => {
+        const d = akteDialog(param, () => {
+          if (Router.teile()[0] === 'geraete' && Router.teile()[1] === param) gehe('/geraete', true);
+        });
+        d.ausAdresse = true;
+      }, 0);
+    }
+  } else if (offeneAkte && !offeneAkte.zu && offeneAkte.ausAdresse) {
+    offeneAkte.schliessen();
+  }
+
+  const liste = geraeteGefiltert(z);
+  // Gewählte, die nicht mehr zu sehen sind, bleiben gewählt – aber die Zahl nennt nur sichtbare.
+  const gewaehlt = liste.filter((g) => z.gewaehlt.has(g.id)).map((g) => g.id);
+  const filterAktiv = z.suche || z.status || z.typ || z.ort;
+
+  const steuer = (k, text, optionen) => h('select', {
+    id: 'gf-' + k,
+    onchange: (e) => {
+      z[k] = e.target.value;
+      z.menge = 0;
+      zeichnen();
+    },
+  }, [h('option', { value: '' }, text)].concat(optionen.map((o) => h('option', { value: o[0], selected: z[k] === o[0] }, o[1]))));
+
+  return [
+    werkzeugleiste('Geräte', plural(liste.length, 'Gerät', 'Geräte') + (filterAktiv ? ' gefiltert' : ''), [
+      h('button.btn', { onclick: () => csvExport('geraete', liste) }, icon('download', 16), 'CSV'),
+      technik ? knopf('Neues Gerät', 'plus', () => geraetFormular(null, { geraetetyp_id: z.typ, lagerplatz_id: z.ort }), 'btn-primary') : null,
+    ]),
+    h('div.karte',
+      h('div.filterleiste',
+        h('input.suche', {
+          id: 'gf-suche',
+          placeholder: 'Suchen: Bezeichnung, Barcode, Seriennummer, Typ …',
+          value: z.suche,
+          oninput: (e) => {
+            z.suche = e.target.value;
+            z.menge = 0;
+            zeichnen();
+          },
+        }),
+        steuer('status', 'Jeder Status', ALLE_STATUS.map((s) => [s, STATUS_TEXT[s]])),
+        steuer('typ', 'Jeder Typ', sortiertNachName(Z.daten.typen).map((t) => [t.id, t.name])),
+        steuer('ort', 'Jeder Lagerplatz', sortiertNachName(Z.daten.lagerplaetze).map((o) => [o.id, o.name])),
+        h('label.haken', h('input', { type: 'checkbox', id: 'gf-aus', checked: z.ausgemustert, onchange: (e) => { z.ausgemustert = e.target.checked; zeichnen(); } }), h('span', 'Ausgemusterte zeigen')),
+        filterAktiv ? h('button.btn.btn-klein.btn-text', { onclick: () => { Object.assign(z, { suche: '', status: '', typ: '', ort: '' }); zeichnen(); } }, 'Filter zurücksetzen') : null),
+      gewaehlt.length ? h('div.filterleiste', { style: { background: 'var(--rot-50)' } },
+        h('strong', gewaehlt.length + ' gewählt'),
+        h('button.btn.btn-klein.btn-primary', { onclick: () => umlagernDialog(gewaehlt, () => { z.gewaehlt.clear(); zeichnen(); }) }, icon('umlagern', 14), 'Umlagern'),
+        technik ? h('button.btn.btn-klein', { onclick: () => statusDialog(gewaehlt, () => { z.gewaehlt.clear(); zeichnen(); }) }, 'Status …') : null,
+        h('button.btn.btn-klein', { onclick: () => etikettenFuer('geraete', gewaehlt) }, icon('etikett', 14), 'Etiketten'),
+        h('button.btn.btn-klein.btn-text', { onclick: () => { z.gewaehlt.clear(); zeichnen(); } }, 'Auswahl aufheben')) : null,
+      tabelle({
+        zustand: z,
+        schluessel: (g) => g.id,
+        zeilen: liste,
+        auswahl: { set: z.gewaehlt, neu: () => zeichnen() },
+        klick: (g) => akteOeffnen(g.id),
+        leer: Z.daten.geraete.length ? 'Kein Gerät passt zu diesem Filter.' : 'Noch keine Geräte erfasst.',
+        spalten: [
+          { id: 'geraet', titel: 'Gerät', wert: geraetTitel, zelle: (g) => [h('strong', geraetTitel(g)), h('div.klein.gedimmt', g.bezeichnung ? typName(g.geraetetyp_id) : g.seriennummer || '')] },
+          { id: 'barcode', titel: 'Barcode', wert: (g) => g.barcode, zelle: (g) => h('span.mono', g.barcode) },
+          { id: 'ort', titel: 'Standort', wert: (g) => ortName(g.lagerplatz_id), zelle: (g) => ortZeile(g.lagerplatz_id) },
+          { id: 'status', titel: 'Status', wert: (g) => ALLE_STATUS.indexOf(g.status), zelle: (g) => statusBadge(g.status) },
+          { id: 'faellig', titel: 'Nächste Prüfung', wert: (g) => { const s = naechsteFaelligkeit(g.id); return s ? s.naechste_faellig : null; }, zelle: (g) => {
+            if (g.status === 'ausgemustert') return h('span.gedimmt', '–');
+            const s = naechsteFaelligkeit(g.id);
+            if (!s) return h('span.badge.badge-grau', 'kein Plan');
+            const p = Z.idx.plan.get(s.pruefplan_id);
+            return [faelligBadge(tageBis(s.naechste_faellig)), h('div.klein.gedimmt', (p ? p.name + ' · ' : '') + datum(s.naechste_faellig))];
+          } },
+          { id: 'satz', titel: 'Satz', wert: (g) => (g.satz_id ? Z.idx.satz.get(g.satz_id).name : ''), zelle: (g) => (g.satz_id ? h('span.klein', Z.idx.satz.get(g.satz_id).name) : '') },
+        ],
+      })),
+  ];
+}
+
+// ─────────────────────────────── Gerätesätze ───────────────────────────────
+
+let offenerSatz = null;
+
+function seiteSaetze(param) {
+  const z = ui('saetze', { sortiert: 'name' });
+  const technik = istTechnik();
+  if (param && Z.idx.satz.has(param)) {
+    if (!offenerSatz || offenerSatz.zu || offenerSatz.satzId !== param) {
+      setTimeout(() => {
+        if (offenerSatz && !offenerSatz.zu) offenerSatz.schliessen();
+        offenerSatz = satzDialog(param, () => {
+          if (Router.teile()[0] === 'saetze' && Router.teile()[1] === param) gehe('/saetze', true);
+        });
+        offenerSatz.satzId = param;
+      }, 0);
+    }
+  } else if (offenerSatz && !offenerSatz.zu) {
+    offenerSatz.schliessen();
+  }
+
+  const fehltText = (s) => s.fehlt.map((f) => typName(f.geraetetyp_id) + ' ' + f.ist + '/' + f.soll).join(', ');
+  return [
+    werkzeugleiste('Gerätesätze', 'Ein Satz bündelt Geräte, die zusammen benutzt werden. Wer sein Etikett scannt, bucht alle Teile.', [
+      technik ? knopf('Neuer Satz', 'plus', () => satzFormular(null, (id) => gehe('/saetze/' + id, true)), 'btn-primary') : null,
+    ]),
+    h('div.karte',
+      tabelle({
+        zustand: z,
+        schluessel: (s) => s.id,
+        zeilen: Z.daten.saetze,
+        leer: 'Noch keine Gerätesätze.',
+        klick: (s) => gehe('/saetze/' + s.id, true),
+        spalten: [
+          { id: 'name', titel: 'Satz', wert: (s) => s.name, zelle: (s) => [h('strong', s.name), h('div.klein.gedimmt', s.satzart_id ? (Z.idx.satzart.get(s.satzart_id) || {}).name : 'ohne Vorlage')] },
+          { id: 'teile', titel: 'Teile', wert: (s) => s.teile.length, zelle: (s) => String(s.teile.length) },
+          { id: 'ort', titel: 'Standort', wert: (s) => (s.verteilt ? 'zzz' : ortName(s.standort_id)), zelle: (s) => (s.verteilt ? h('span.badge.badge-gelb', 'verteilt') : s.standort_id ? ortZeile(s.standort_id) : h('span.gedimmt', '–')) },
+          { id: 'vollst', titel: 'Vollständigkeit', wert: (s) => s.vollstaendigkeit, zelle: (s) => [vollstBadge(s.vollstaendigkeit), s.fehlt.length ? h('div.klein.gedimmt', 'fehlt: ' + fehltText(s)) : null] },
+          { id: 'barcode', titel: 'Barcode', wert: (s) => s.barcode, zelle: (s) => h('span.mono', s.barcode || '') },
+        ],
+      })),
+    h('div.karte',
+      h('div.karte-kopf', h('h2', 'Satzarten (Vorlagen)'), technik ? h('button.btn.btn-klein', { onclick: () => satzartFormular(null) }, icon('plus', 14), 'Neue Satzart') : null),
+      tabelle({
+        zustand: ui('satzarten', { sortiert: 'name' }),
+        schluessel: (a) => a.id,
+        zeilen: Z.daten.satzarten,
+        leer: 'Keine Vorlagen. Ohne Vorlage ist ein Satz einfach eine Liste – mit ihr weiß die Anwendung, was fehlt.',
+        spalten: [
+          { id: 'name', titel: 'Satzart', wert: (a) => a.name, zelle: (a) => [h('strong', a.name), a.beschreibung ? h('div.klein.gedimmt', a.beschreibung) : null] },
+          { id: 'teile', titel: 'Soll', zelle: (a) => h('span.klein', Z.daten.satzteile.filter((t) => t.satzart_id === a.id)
+            .map((t) => (t.min_anzahl === t.max_anzahl ? t.min_anzahl : t.min_anzahl + '–' + t.max_anzahl) + '× ' + typName(t.geraetetyp_id)).join(', ') || '–') },
+          { id: 'saetze', titel: 'Sätze', wert: (a) => Z.daten.saetze.filter((s) => s.satzart_id === a.id).length, zelle: (a) => String(Z.daten.saetze.filter((s) => s.satzart_id === a.id).length) },
+        ],
+        aktion: technik ? (a) => [
+          h('button.btn.btn-klein', { onclick: () => satzartFormular(a) }, 'Bearbeiten'),
+          h('button.btn.btn-klein.btn-gefahr', {
+            onclick: async () => {
+              if (!(await bestaetigen({ titel: 'Satzart „' + a.name + '“ löschen?', text: 'Geht nur, solange kein Satz sie benutzt.', ja: 'Löschen', gefahr: true }))) return;
+              sofort('satzarten.loeschen', { id: a.id }, 'Gelöscht.');
+            },
+          }, icon('muell', 14)),
+        ] : null,
+      })),
+  ];
+}
+
+// ─────────────────────────────── Gerätetypen & Prüfpläne ───────────────────────────────
+
+function seiteTypen(param) {
+  const z = ui('typen', { suche: '' });
+  const typen = sortiertNachName(Z.daten.typen).filter((t) => !z.suche || norm(t.name + ' ' + (t.hersteller || '') + ' ' + (t.modell || '')).indexOf(norm(z.suche)) >= 0);
+  const gewaehlt = (param && Z.idx.typ.get(param)) || typen[0] || null;
+  const anzahl = (t) => Z.daten.geraete.filter((g) => g.geraetetyp_id === t.id && g.status !== 'ausgemustert').length;
+
+  const liste = h('div.karte.stamm-liste',
+    h('div.filterleiste', h('input', {
+      id: 'tf-suche',
+      placeholder: 'Typ suchen …',
+      value: z.suche,
+      oninput: (e) => {
+        z.suche = e.target.value;
+        zeichnen();
+      },
+    })),
+    typen.length ? typen.map((t) => h('button.stamm-eintrag' + (gewaehlt && t.id === gewaehlt.id ? '.aktiv' : ''), { onclick: () => gehe('/typen/' + t.id, true) },
+      h('strong', t.name),
+      h('span.klein.gedimmt', plural(anzahl(t), 'Gerät', 'Geräte') + ' · ' + plural(Z.daten.plaene.filter((p) => p.geraetetyp_id === t.id && !p.geraet_id).length, 'Prüfplan', 'Prüfpläne'))))
+      : h('div.leer', Z.daten.typen.length ? 'Nichts gefunden.' : 'Noch keine Gerätetypen.'));
+
+  let rechts = h('div.karte', h('div.leer', 'Links einen Gerätetyp wählen oder einen neuen anlegen.'));
+  if (gewaehlt) {
+    const t = gewaehlt;
+    const plaene = Z.daten.plaene.filter((p) => p.geraetetyp_id === t.id && !p.geraet_id);
+    const sonder = Z.daten.plaene.filter((p) => p.geraetetyp_id === t.id && p.geraet_id);
+    const schritteVon = (p) => Z.daten.schritte.filter((s) => s.pruefplan_id === p.id).length;
+    rechts = h('div',
+      h('div.karte',
+        h('div.karte-kopf',
+          h('div', h('h2', t.name), h('div.klein.gedimmt', [t.hersteller, t.modell].filter(Boolean).join(' · ') || 'ohne Hersteller')),
+          h('div.knopfreihe',
+            h('button.btn.btn-klein', { onclick: () => { Object.assign(ui('geraete', {}), { typ: t.id, status: '', ort: '', suche: '' }); gehe('/geraete'); } }, plural(anzahl(t), 'Gerät', 'Geräte') + ' anzeigen'),
+            h('button.btn.btn-klein', { onclick: () => typFormular(t) }, icon('stift', 14), 'Bearbeiten'),
+            h('button.btn.btn-klein.btn-gefahr', {
+              onclick: async () => {
+                if (!(await bestaetigen({ titel: '„' + t.name + '“ löschen?', text: 'Geht nur, solange es keine Geräte dieses Typs gibt. Seine Prüfpläne gehen mit.', ja: 'Löschen', gefahr: true }))) return;
+                if (sofort('typen.loeschen', { id: t.id }, 'Gelöscht.')) gehe('/typen', true);
+              },
+            }, icon('muell', 14)))),
+        t.beschreibung ? h('div.karte-inhalt', h('p', { style: { margin: 0 } }, t.beschreibung)) : null),
+      h('div.karte',
+        h('div.karte-kopf', h('h2', 'Prüfpläne'), h('button.btn.btn-klein.btn-primary', { onclick: () => planFormular(null, { geraetetyp_id: t.id }) }, icon('plus', 14), 'Prüfplan anlegen')),
+        tabelle({
+          zustand: ui('typ-plaene'),
+          schluessel: (p) => p.id,
+          zeilen: plaene,
+          leer: 'Kein Prüfplan – Geräte dieses Typs werden nie zur Prüfung erinnert.',
+          spalten: [
+            { id: 'name', titel: 'Prüfung', wert: (p) => p.name, zelle: (p) => [h('strong', p.name), p.beschreibung ? h('div.klein.gedimmt', p.beschreibung) : null] },
+            { id: 'intervall', titel: 'Intervall', zelle: (p) => intervallText(p.intervall_wert, p.intervall_einheit) },
+            { id: 'schritte', titel: 'Checkliste', zelle: (p) => (schritteVon(p) ? plural(schritteVon(p), 'Schritt', 'Schritte') : h('span.gedimmt', 'keine')) },
+          ],
+          aktion: (p) => [
+            h('button.btn.btn-klein', { onclick: () => schritteDialog(p) }, 'Schritte'),
+            h('button.btn.btn-klein', { onclick: () => planFormular(p) }, 'Bearbeiten'),
+            h('button.btn.btn-klein.btn-gefahr', {
+              onclick: async () => {
+                if (!(await bestaetigen({ titel: 'Prüfplan „' + p.name + '“ löschen?', text: 'Die Termine aller Geräte zu diesem Plan verschwinden. Erfasste Prüfungen bleiben als Nachweis erhalten.', ja: 'Löschen', gefahr: true }))) return;
+                sofort('plaene.loeschen', { id: p.id }, 'Prüfplan gelöscht.');
+              },
+            }, icon('muell', 14)),
+          ],
+        })),
+      sonder.length ? h('div.karte',
+        h('div.karte-kopf', h('h2', 'Sonderpläne einzelner Geräte')),
+        tabelle({
+          zustand: ui('typ-sonder'),
+          schluessel: (p) => p.id,
+          zeilen: sonder,
+          spalten: [
+            { id: 'geraet', titel: 'Gerät', zelle: (p) => h('strong', geraetTitel(Z.idx.geraet.get(p.geraet_id))) },
+            { id: 'name', titel: 'Prüfung', zelle: (p) => p.name },
+            { id: 'intervall', titel: 'Intervall', zelle: (p) => intervallText(p.intervall_wert, p.intervall_einheit) },
+          ],
+          aktion: (p) => [
+            h('button.btn.btn-klein', { onclick: () => schritteDialog(p) }, 'Schritte'),
+            h('button.btn.btn-klein', { onclick: () => planFormular(p) }, 'Bearbeiten'),
+            h('button.btn.btn-klein.btn-gefahr', { onclick: () => sofort('plaene.loeschen', { id: p.id }, 'Gelöscht.') }, icon('muell', 14)),
+          ],
+        })) : null);
+  }
+
+  return [
+    werkzeugleiste('Gerätetypen & Prüfpläne', 'Ein Prüfplan am Typ gilt für jedes Gerät dieses Typs – auch für die, die später dazukommen.', [
+      knopf('Neuer Gerätetyp', 'plus', () => typFormular(null, (id) => gehe('/typen/' + id, true)), 'btn-primary'),
+    ]),
+    h('div.stamm', liste, rechts),
+  ];
+}
+
+// ─────────────────────────────── Lagerplätze ───────────────────────────────
+
+function ortPfad(o) {
+  const kette = [];
+  let x = o;
+  const gesehen = new Set();
+  while (x && x.ober_id && !gesehen.has(x.id)) {
+    gesehen.add(x.id);
+    x = Z.idx.ort.get(x.ober_id);
+    if (x) kette.unshift(x.name);
+  }
+  return kette.join(' › ');
+}
+
+function lagerplatzDialog(id) {
+  dialog({
+    titel: 'Lagerplatz',
+    breite: 'mittel',
+    lebendig: true,
+    inhalt: (c) => {
+      const o = Z.idx.ort.get(id);
+      if (!o) return h('div.leer', 'Diesen Lagerplatz gibt es nicht (mehr).');
+      c.titel(o.name);
+      const geraete = (Z.idx.geraeteAn.get(id) || []).filter((g) => g.status !== 'ausgemustert');
+      return [
+        h('div.detail-raster',
+          h('div.detail-feld', h('span', 'Typ'), h('strong', ORT_TYP_TEXT[o.typ])),
+          h('div.detail-feld', h('span', 'Code'), h('strong.mono', o.code)),
+          h('div.detail-feld', h('span', 'Gehört zu'), h('strong', ortPfad(o) || '–')),
+          h('div.detail-feld', h('span', 'Zuletzt gezählt'), h('strong', o.zuletzt_gezaehlt ? datumZeit(o.zuletzt_gezaehlt) : 'noch nie'))),
+        h('div.knopfreihe', { style: { marginBottom: '12px' } },
+          geraete.length ? h('button.btn.btn-klein', { onclick: () => umlagernDialog(geraete.map((g) => g.id)) }, icon('umlagern', 14), 'Alles umlagern') : null,
+          h('button.btn.btn-klein', { onclick: () => etikettenFuer('lagerplaetze', [id]) }, icon('etikett', 14), 'Etikett')),
+        h('div.karte', tabelle({
+          zustand: ui('ort-bestand'),
+          neu: () => c.neu(),
+          schluessel: (g) => g.id,
+          zeilen: geraete,
+          leer: 'Hier steht nichts.',
+          klick: (g) => akteDialog(g.id),
+          spalten: [
+            { id: 'geraet', titel: 'Gerät', wert: geraetTitel, zelle: (g) => [h('strong', geraetTitel(g)), h('div.klein.gedimmt', typName(g.geraetetyp_id) + ' · ' + g.barcode)] },
+            { id: 'status', titel: 'Status', wert: (g) => g.status, zelle: (g) => statusBadge(g.status) },
+          ],
+        })),
+      ];
+    },
+  });
+}
+
+function seiteLagerplaetze() {
+  const z = ui('lagerplaetze', { sortiert: 'name' });
+  return [
+    werkzeugleiste('Lagerplätze', 'Wo Geräte stehen können: Lager, Fahrzeuge, Werkstatt. Jeder Platz hat ein Etikett zum Scannen.', [
+      knopf('Neuer Lagerplatz', 'plus', () => ortFormular(null), 'btn-primary'),
+    ]),
+    h('div.karte', tabelle({
+      zustand: z,
+      schluessel: (o) => o.id,
+      zeilen: Z.daten.lagerplaetze,
+      leer: 'Noch keine Lagerplätze.',
+      klick: (o) => lagerplatzDialog(o.id),
+      spalten: [
+        { id: 'name', titel: 'Lagerplatz', wert: (o) => (ortPfad(o) ? ortPfad(o) + ' › ' : '') + o.name, zelle: (o) => [h('strong', { style: { display: 'inline-flex', gap: '6px', alignItems: 'center' } }, ortIcon(o.typ), o.name), ortPfad(o) ? h('div.klein.gedimmt', 'in ' + ortPfad(o)) : null] },
+        { id: 'code', titel: 'Code', wert: (o) => o.code, zelle: (o) => h('span.mono', o.code) },
+        { id: 'typ', titel: 'Typ', wert: (o) => ORT_TYP_TEXT[o.typ], zelle: (o) => ORT_TYP_TEXT[o.typ] },
+        { id: 'bestand', titel: 'Geräte', wert: (o) => o.bestand, zelle: (o) => String(o.bestand), klasse: 'rechts' },
+        { id: 'gezaehlt', titel: 'Zuletzt gezählt', wert: (o) => o.zuletzt_gezaehlt, zelle: (o) => (o.zuletzt_gezaehlt ? h('span.klein', datum(o.zuletzt_gezaehlt)) : h('span.klein.gedimmt', 'noch nie')) },
+      ],
+      aktion: (o) => [
+        h('button.btn.btn-klein', { onclick: () => ortFormular(o) }, 'Bearbeiten'),
+        h('button.btn.btn-klein.btn-gefahr', {
+          onclick: async () => {
+            if (!(await bestaetigen({ titel: '„' + o.name + '“ löschen?', text: 'Geht nur, wenn dort nichts mehr steht und kein anderer Platz darunter hängt. Buchungen behalten den Namen.', ja: 'Löschen', gefahr: true }))) return;
+            sofort('lagerplaetze.loeschen', { id: o.id }, 'Gelöscht.');
+          },
+        }, icon('muell', 14)),
+      ],
+    })),
+  ];
+}
+
+// ─────────────────────────────── Umlagerungsgründe ───────────────────────────────
+
+function seiteGruende() {
+  const gruende = Z.daten.gruende.slice().sort((a, b) => a.position - b.position);
+  return [
+    werkzeugleiste('Umlagerungsgründe', 'Warum ein Gerät den Platz wechselt – und welchen Zustand es danach hat. Die Reihenfolge ist die im Buchungsdialog.', [
+      knopf('Neuer Grund', 'plus', () => grundFormular(null), 'btn-primary'),
+    ]),
+    h('div.karte', tabelle({
+      zustand: {},
+      schluessel: (g) => g.id,
+      zeilen: gruende,
+      leer: 'Noch keine Gründe – ohne sie hat der Buchungsdialog nichts anzubieten.',
+      spalten: [
+        { id: 'pos', titel: '', zelle: (g) => h('span.knopfreihe', { style: { gap: '2px', flexWrap: 'nowrap' } },
+          h('button.btn.btn-klein', { title: 'Nach oben', onclick: () => sofort('gruende.verschieben', { id: g.id, richtung: -1 }) }, icon('hoch', 13)),
+          h('button.btn.btn-klein', { title: 'Nach unten', onclick: () => sofort('gruende.verschieben', { id: g.id, richtung: 1 }) }, icon('runter', 13))) },
+        { id: 'name', titel: 'Grund', zelle: (g) => [h('strong', g.name), g.beschreibung ? h('div.klein.gedimmt', g.beschreibung) : null] },
+        { id: 'danach', titel: 'Status danach', zelle: (g) => (g.status_danach ? statusBadge(g.status_danach) : h('span.gedimmt.klein', 'unverändert')) },
+        { id: 'aktiv', titel: 'Angeboten', zelle: (g) => (g.aktiv ? h('span.badge.badge-gruen', 'ja') : h('span.badge.badge-grau', 'stillgelegt')) },
+      ],
+      aktion: (g) => [
+        h('button.btn.btn-klein', { onclick: () => grundFormular(g) }, 'Bearbeiten'),
+        h('button.btn.btn-klein.btn-gefahr', {
+          onclick: async () => {
+            if (!(await bestaetigen({ titel: '„' + g.name + '“ löschen?', text: 'Vergangene Buchungen behalten den Namen. Stilllegen wäre die sanftere Wahl.', ja: 'Löschen', gefahr: true }))) return;
+            sofort('gruende.loeschen', { id: g.id }, 'Gelöscht.');
+          },
+        }, icon('muell', 14)),
+      ],
+    })),
+  ];
+}
+
+// ─────────────────────────────── Etiketten ───────────────────────────────
+
+function etikettQuellen(art) {
+  if (art === 'lagerplaetze') {
+    return sortiertNachName(Z.daten.lagerplaetze).map((o) => ({ id: o.id, titel: o.name, unter: ORT_TYP_TEXT[o.typ], code: o.code, suche: o.name + ' ' + o.code }));
+  }
+  if (art === 'saetze') {
+    return sortiertNachName(Z.daten.saetze).map((s) => ({ id: s.id, titel: s.name, unter: 'Gerätesatz · ' + s.teile.length + ' Teile', code: s.barcode, suche: s.name + ' ' + s.barcode }));
+  }
+  return Z.daten.geraete.filter((g) => g.status !== 'ausgemustert')
+    .sort((a, b) => vergleich(geraetTitel(a), geraetTitel(b)))
+    .map((g) => ({ id: g.id, titel: geraetTitel(g), unter: typName(g.geraetetyp_id) + (g.seriennummer ? ' · SN ' + g.seriennummer : ''), code: g.barcode, suche: [g.bezeichnung, g.barcode, typName(g.geraetetyp_id), ortName(g.lagerplatz_id)].join(' ') }));
+}
+
+function seiteEtiketten() {
+  const z = ui('etiketten', { art: 'geraete', gewaehlt: new Set(), groesse: 'mittel', suche: '' });
+  const quellen = etikettQuellen(z.art);
+  const sichtbar = quellen.filter((q) => !z.suche || norm(q.suche).indexOf(norm(z.suche)) >= 0);
+  const gewaehlt = quellen.filter((q) => z.gewaehlt.has(q.id));
+  const wehr = Z.daten.wehr.name;
+
+  const bogen = h('div.etiketten-bogen.' + z.groesse, gewaehlt.map((q) => h('div.etikett',
+    h('div.etikett-kopf', h('span', wehr), h('span', q.unter.split(' · ')[0])),
+    h('div.etikett-titel', q.titel),
+    code128Svg(q.code),
+    h('div.etikett-code', q.code))));
+
+  const art = (k, text) => h('button' + (z.art === k ? '.aktiv' : ''), { type: 'button', onclick: () => { z.art = k; z.gewaehlt = new Set(); z.suche = ''; zeichnen(); } }, text);
+
+  return [
+    werkzeugleiste('Etiketten', 'Code 128 – lesbar für Handscanner und die Kamera am Telefon.', [
+      h('select', { id: 'et-groesse', style: { width: 'auto' }, onchange: (e) => { z.groesse = e.target.value; zeichnen(); } },
+        [['gross', '2 je Zeile'], ['mittel', '3 je Zeile'], ['klein', '4 je Zeile']].map((o) => h('option', { value: o[0], selected: z.groesse === o[0] }, o[1]))),
+      h('button.btn.btn-primary', { disabled: !gewaehlt.length, onclick: () => drucken(bogen) }, icon('drucken', 16), gewaehlt.length ? plural(gewaehlt.length, 'Etikett', 'Etiketten') + ' drucken' : 'Drucken'),
+    ]),
+    h('div.stamm',
+      h('div.karte.stamm-liste',
+        h('div.reiter', { style: { margin: '0', padding: '0 8px' } }, art('geraete', 'Geräte'), art('lagerplaetze', 'Lagerplätze'), art('saetze', 'Sätze')),
+        h('div.filterleiste',
+          h('input', { id: 'et-suche', placeholder: 'Suchen …', value: z.suche, oninput: (e) => { z.suche = e.target.value; zeichnen(); } }),
+          h('button.btn.btn-klein', { onclick: () => { sichtbar.forEach((q) => z.gewaehlt.add(q.id)); zeichnen(); } }, 'Alle'),
+          h('button.btn.btn-klein', { onclick: () => { z.gewaehlt.clear(); zeichnen(); } }, 'Keine')),
+        sichtbar.map((q) => h('label.stamm-eintrag', { style: { flexDirection: 'row', alignItems: 'center', gap: '10px' } },
+          h('input', { type: 'checkbox', checked: z.gewaehlt.has(q.id), onchange: (e) => { if (e.target.checked) z.gewaehlt.add(q.id); else z.gewaehlt.delete(q.id); zeichnen(); } }),
+          h('span', { style: { display: 'flex', flexDirection: 'column', minWidth: 0 } }, h('strong', q.titel), h('span.klein.gedimmt.mono', q.code))))),
+      h('div.karte', h('div.karte-inhalt', gewaehlt.length ? bogen : h('div.leer', 'Links auswählen, was ein Etikett bekommen soll.')))),
+  ];
+}
+
+// ─────────────────────────────── Mitglieder ───────────────────────────────
+
+function seiteMitglieder() {
+  const admin = istAdmin();
+  const z = ui('mitglieder', { sortiert: 'name' });
+  const ausweis = async (m) => {
+    if (m.ausweis_seit && !(await bestaetigen({ titel: 'Neuen Ausweis für ' + m.name + '?', text: 'Der bisherige gilt ab sofort nicht mehr.', ja: 'Neuen ausgeben' }))) return;
+    try {
+      ausweisDialog(await api('ausweis.ausgeben', { mitglied: m.id }));
+    } catch (e) {
+      meldung.fehler(e);
+    }
+  };
+  return [
+    werkzeugleiste('Mitglieder', admin ? 'Wer mit welchem Firmenkonto hineinkommt – und mit welcher Rolle.' : 'Wer zur Wehr gehört.', [
+      admin ? knopf('Mitglied aufnehmen', 'plus', () => mitgliedFormular(null), 'btn-primary') : null,
+    ]),
+    h('div.karte', tabelle({
+      zustand: z,
+      schluessel: (m) => m.id,
+      zeilen: Z.daten.mitglieder,
+      klick: istPersonal() ? (m) => gehe('/personal/' + m.id) : null,
+      spalten: [
+        { id: 'name', titel: 'Name', wert: (m) => m.name, zelle: (m) => [h('strong', m.name), admin ? h('div.klein.gedimmt', m.email) : null] },
+        admin ? { id: 'kuerzel', titel: 'Kürzel', wert: (m) => m.kuerzel, zelle: (m) => (m.kuerzel ? h('span.mono.fett', m.kuerzel) : h('span.klein.gedimmt', '–')) } : null,
+        { id: 'rolle', titel: 'Rolle', wert: (m) => ['admin', 'kommandant', 'geraetewart', 'mitglied'].indexOf(m.rolle), zelle: (m) => h('span.badge.' + (ROLLE_FARBE[m.rolle] || 'badge-grau'), ROLLE_TEXT[m.rolle] || m.rolle) },
+        istPersonal() ? { id: 'atemschutz', titel: 'Atemschutz', wert: (m) => ATEMSCHUTZ_FOLGE.indexOf(Z.daten.personal.atemschutz[m.id]), zelle: (m) => atemschutzBadge(Z.daten.personal.atemschutz[m.id]) } : null,
+        admin ? { id: 'ausweis', titel: 'Ausweis', wert: (m) => m.ausweis_seit, zelle: (m) => (m.ausweis_seit ? h('span.klein', 'seit ' + datum(m.ausweis_seit)) : h('span.klein.gedimmt', 'keiner')) } : null,
+        admin ? { id: 'gesehen', titel: 'Zuletzt da', wert: (m) => m.zuletzt_gesehen, zelle: (m) => h('span.klein', m.zuletzt_gesehen ? datumZeit(m.zuletzt_gesehen) : 'noch nie') } : null,
+        { id: 'zustand', titel: 'Zugang', wert: (m) => (m.aktiv ? 0 : 1), zelle: (m) => (m.aktiv ? h('span.badge.badge-gruen', 'aktiv') : h('span.badge.badge-grau', 'gesperrt')) },
+      ].filter(Boolean),
+      aktion: admin ? (m) => [
+        h('button.btn.btn-klein', { onclick: () => mitgliedFormular(m) }, 'Bearbeiten'),
+        h('button.btn.btn-klein', { onclick: () => ausweis(m), title: 'Ausweis ausgeben' }, icon('ausweis', 14)),
+        m.ausweis_seit ? h('button.btn.btn-klein', {
+          title: 'Ausweis zurückziehen',
+          onclick: async () => {
+            if (!(await bestaetigen({ titel: 'Ausweis von ' + m.name + ' zurückziehen?', text: 'Er gilt sofort nicht mehr. Eine laufende Hallensitzung damit endet.', ja: 'Zurückziehen', gefahr: true }))) return;
+            sofort('ausweis.zurueckziehen', { mitglied: m.id }, 'Ausweis zurückgezogen.');
+          },
+        }, '✕') : null,
+        m.id !== Z.daten.ich.id ? h('button.btn.btn-klein.btn-gefahr', {
+          onclick: async () => {
+            if (!(await bestaetigen({ titel: m.name + ' entfernen?', text: 'Der Zugang wird gelöscht. Buchungen und Prüfungen behalten den Namen als Momentaufnahme. Sperren wäre umkehrbar.', ja: 'Entfernen', gefahr: true }))) return;
+            sofort('mitglieder.loeschen', { id: m.id }, 'Entfernt.');
+          },
+        }, icon('muell', 14)) : null,
+      ] : null,
+    })),
+    admin ? h('div.infobox', { style: { marginTop: '18px' } }, h('span', 'Am Schreibtisch meldet Google an – mit dem Firmenkonto. In der Halle zählen Ausweis oder Kürzel, und zwar nur an angemeldeten Hallengeräten (Einstellungen → Fahrzeughalle).')) : null,
+  ];
+}
+
+// ─────────────────────────────── Protokoll ───────────────────────────────
+
+const AKTION_PROTOKOLL = {
+  anlegen: ['Angelegt', 'badge-gruen'],
+  aendern: ['Geändert', 'badge-blau'],
+  loeschen: ['Gelöscht', 'badge-rot'],
+  anmeldung: ['Angemeldet (Halle)', 'badge-blau'],
+  anmeldung_fehlgeschlagen: ['Anmeldung fehlgeschlagen', 'badge-gelb'],
+};
+const OBJEKT_TEXT = {
+  geraete: 'Gerät', lagerplaetze: 'Lagerplatz', geraetetypen: 'Gerätetyp', pruefplaene: 'Prüfplan', pruefschritte: 'Prüfschritt',
+  plan_stand: 'Fälligkeit', gruende: 'Umlagerungsgrund', buchungen: 'Buchung', pruefungen: 'Prüfung', satzarten: 'Satzart',
+  satzart_teile: 'Satzart-Teil', saetze: 'Gerätesatz', satz_mitglieder: 'Satz-Bestückung', regeln: 'Regel', inventuren: 'Inventur',
+  hallengeraete: 'Hallengerät', ausweise: 'Ausweis', mitglieder: 'Mitglied', einstellungen: 'Einstellung',
+  qualiarten: 'Qualifikation', nachweise: 'Nachweis', einsaetze: 'Einsatzbericht', einsatz_kraefte: 'Einsatzkraft',
+};
+
+const FELD_TEXT = {
+  name: 'Name', bezeichnung: 'Bezeichnung', beschreibung: 'Beschreibung', bemerkung: 'Bemerkung', barcode: 'Barcode',
+  seriennummer: 'Seriennr.', status: 'Status', status_danach: 'Status danach', lagerplatz_id: 'Standort', ober_id: 'gehört zu',
+  geraetetyp_id: 'Typ', geraet_id: 'Gerät', von_id: 'von', nach_id: 'nach', von_name: 'von', nach_name: 'nach', grund_name: 'Grund',
+  email: 'Google-Adresse', kuerzel: 'Kürzel', rolle: 'Rolle', aktiv: 'aktiv', kuerzel_erlaubt: 'Kürzel erlaubt', mit: 'mit', geraet: 'Gerät', eingabe: 'Eingabe',
+  code: 'Code', typ: 'Typ', hersteller: 'Hersteller', modell: 'Modell', intervall_wert: 'Intervall', intervall_einheit: 'Einheit',
+  naechste_faellig: 'nächste Fälligkeit', zuletzt_geprueft: 'zuletzt geprüft', abw_wert: 'abw. Intervall', abw_einheit: 'abw. Einheit',
+  titel: 'Titel', art: 'Art', einheit: 'Einheit', pflicht: 'Pflicht', position: 'Position', ausloeser: 'Auslöser',
+  bedingungen: 'Wenn', aktionen: 'Dann', plan_name: 'Prüfplan', ergebnis: 'Ergebnis', geprueft_am: 'geprüft am',
+  benutzer_name: 'von', wert: 'Wert', schluessel: 'Einstellung', min_anzahl: 'mindestens', max_anzahl: 'höchstens',
+  geteilt: 'geteilt', gesperrt: 'gesperrt', abmelden_nach_min: 'Abmelden nach (min)', gefunden: 'gefunden', fehlt: 'fehlt',
+  fremd: 'fremd', korrigiert: 'geradegebucht', beendet_am: 'beendet', lagerplatz_name: 'Lagerplatz', faellig_am: 'fällig war',
+  mitglied_id: 'Mitglied', art_id: 'Qualifikation', erworben_am: 'erworben', gueltig_bis: 'gültig bis', gueltig_wert: 'gilt',
+  gueltig_einheit: 'Einheit', atemschutz: 'Atemschutz', erfasst_von: 'erfasst von', aus_einsatz: 'aus Einsätzen',
+  nummer: 'Nummer', stichwort: 'Stichwort', ort: 'Ort', einsatzleiter: 'Einsatzleitung', beginn: 'Beginn', ende: 'Ende',
+  bericht: 'Bericht', von: 'von', bis: 'bis', funktion: 'Funktion', quelle: 'Quelle', quelle_kennung: 'Tagebuch', tagebuch_eintraege: 'Tagebucheinträge',
+};
+
+function protokollWert(feldName, wert) {
+  if (wert === null || wert === undefined || wert === '') return '(leer)';
+  if (typeof wert === 'boolean') return wert ? 'ja' : 'nein';
+  if (feldName === 'status' || feldName === 'status_danach') return STATUS_TEXT[wert] || wert;
+  if (/lagerplatz_id|von_id|nach_id|ober_id/.test(feldName)) return Z.idx.ort.has(wert) ? ortName(wert) : '(entfernt)';
+  if (feldName === 'geraetetyp_id') return Z.idx.typ.has(wert) ? typName(wert) : '(entfernt)';
+  if (feldName === 'geraet_id') return Z.idx.geraet.has(wert) ? geraetTitel(Z.idx.geraet.get(wert)) : '(entfernt)';
+  if (feldName === 'mitglied_id') return Z.idx.mitglied.has(wert) ? Z.idx.mitglied.get(wert).name : '(entfernt)';
+  if (feldName === 'art_id') return Z.idx.qualiart.has(wert) ? Z.idx.qualiart.get(wert).name : null;
+  if (feldName === 'gueltig_einheit') return EINHEIT_TEXT[wert] || wert;
+  if (feldName === 'beginn' || feldName === 'ende' || feldName === 'von' || feldName === 'bis') return datumZeit(wert);
+  if (feldName === 'quelle_kennung') return null;
+  if (feldName === 'quelle') return wert === 'einsatztagebuch' ? 'Einsatztagebuch' : wert;
+  if (/_id$/.test(feldName) || feldName === 'stapel_id') return null;
+  if (feldName === 'bedingungen' && typeof wert === 'object') return regelSatz({ ausloeser: wert.ergebnis ? 'pruefung' : 'umlagerung', bedingungen: wert, aktionen: [] }).map((x) => (typeof x === 'string' ? x : x.textContent)).join('').replace(/^Wenn |, dann \.$/g, '');
+  if (feldName === 'aktionen' && Array.isArray(wert)) return regelSatz({ bedingungen: {}, aktionen: wert }).slice(-1)[0].replace(/\.$/, '');
+  if (feldName === 'ergebnis') return wert === 'nicht_bestanden' ? 'nicht bestanden' : wert;
+  if (feldName === 'ausloeser') return wert === 'pruefung' ? 'Prüfung' : 'Umlagerung';
+  if (typeof wert === 'object') return JSON.stringify(wert);
+  const t = String(wert);
+  return t.length > 80 ? t.slice(0, 80) + '…' : t;
+}
+
+function protokollEinzelheiten(e) {
+  const d = e.details || {};
+  const teile = [];
+  if (d.aenderungen) {
+    Object.keys(d.aenderungen).forEach((k) => {
+      const paar = d.aenderungen[k];
+      const alt = protokollWert(k, paar[0]);
+      const neu = protokollWert(k, paar[1]);
+      if (alt === null && neu === null) return;
+      teile.push((FELD_TEXT[k] || k) + ': ' + alt + ' → ' + neu);
+    });
+  } else {
+    const quelle = d.angelegt || d.geloescht || d;
+    Object.keys(quelle).forEach((k) => {
+      const w = protokollWert(k, quelle[k]);
+      if (w !== null && w !== '(leer)' && k !== 'schritte' && k !== 'position') teile.push((FELD_TEXT[k] || k) + ': ' + w);
+    });
+  }
+  return teile.join(' · ');
+}
+
+function seiteProtokoll() {
+  const z = ui('protokoll', { suche: '', art: '', seite: 0, eintraege: null, gesamt: 0, laedt: false, fehler: '' });
+  const laden = async (anhaengen) => {
+    z.laedt = true;
+    try {
+      const r = await api('protokoll.lesen', { suche: z.suche, art: z.art, seite: anhaengen ? z.seite + 1 : 0 }, { still: !!z.eintraege });
+      z.eintraege = anhaengen ? z.eintraege.concat(r.eintraege) : r.eintraege;
+      z.gesamt = r.gesamt;
+      z.seite = anhaengen ? z.seite + 1 : 0;
+      z.fehler = '';
+    } catch (e) {
+      z.fehler = e.message;
+    }
+    z.laedt = false;
+    if (Router.teile()[0] === 'protokoll') zeichnen();
+  };
+  if (z.eintraege === null && !z.laedt) laden(false);
+  let warten = null;
+
+  return [
+    werkzeugleiste('Protokoll', 'Jede Änderung, wer sie gemacht hat und wann. Niemand kann hineinschreiben oder sich herausschreiben.', [
+      h('button.btn', { onclick: () => laden(false) }, 'Aktualisieren'),
+    ]),
+    h('div.karte',
+      h('div.filterleiste',
+        h('input.suche', {
+          id: 'pf-suche',
+          placeholder: 'Suchen: Name, Gerät, Barcode …',
+          value: z.suche,
+          oninput: (e) => {
+            z.suche = e.target.value;
+            clearTimeout(warten);
+            warten = setTimeout(() => laden(false), 400);
+          },
+        }),
+        h('select', { id: 'pf-art', onchange: (e) => { z.art = e.target.value; laden(false); } },
+          [h('option', { value: '' }, 'Alle Bereiche')].concat(Object.keys(OBJEKT_TEXT).map((k) => h('option', { value: k, selected: z.art === k }, OBJEKT_TEXT[k]))))),
+      z.fehler ? h('p.fehlertext', { style: { padding: '12px 20px' } }, z.fehler) : null,
+      z.eintraege === null ? h('div.laden', 'Lädt …') : tabelle({
+        zustand: {},
+        schluessel: (e) => e.id,
+        zeilen: z.eintraege,
+        seite: 10000,
+        leer: 'Keine Einträge.',
+        spalten: [
+          { id: 'ts', titel: 'Wann', zelle: (e) => h('span.klein', datumZeit(e.ts)) },
+          { id: 'wer', titel: 'Wer', zelle: (e) => e.benutzer_name || '–' },
+          { id: 'aktion', titel: 'Was', zelle: (e) => { const a = AKTION_PROTOKOLL[e.aktion] || [e.aktion, 'badge-grau']; return h('span.badge.' + a[1], a[0]); } },
+          { id: 'objekt', titel: 'Woran', zelle: (e) => [h('strong', e.objekt_text || '–'), h('div.klein.gedimmt', OBJEKT_TEXT[e.objekt_art] || e.objekt_art)] },
+          { id: 'details', titel: 'Einzelheiten', klasse: 'oben', zelle: (e) => h('span.klein', protokollEinzelheiten(e)) },
+        ],
+      }),
+      z.eintraege && z.eintraege.length < z.gesamt ? h('div.mehr-zeilen',
+        h('button.btn.btn-klein', { disabled: z.laedt, onclick: () => laden(true) }, 'Ältere laden (' + (z.gesamt - z.eintraege.length) + ' weitere)')) : null),
+  ];
+}
+
+// ─────────────────────────────── Import und Export ───────────────────────────────
+
+/**
+ * Excel und LibreOffice führen „=…“, „+…“, „-…“ und „@…“ auch aus einer CSV-Datei als
+ * Formel aus – ein Gerät mit der Bemerkung „=HYPERLINK(…)“ würde beim Öffnen zum Verweis.
+ * Ein vorangestelltes Hochkomma macht daraus Text; der Import nimmt es wieder weg.
+ */
+function csvZelle(w) {
+  let t = w === null || w === undefined ? '' : String(w);
+  if (/^[=+@\t\r]/.test(t) || /^-(?![\d.,]+$)/.test(t)) t = "'" + t;
+  return /[";\n\r]/.test(t) ? '"' + t.replace(/"/g, '""') + '"' : t;
+}
+
+/** Semikolon als Trenner: Das öffnet ein deutsches Excel ohne Nachfrage richtig. */
+function csvExport(art, zeilen) {
+  let kopf;
+  let daten;
+  if (art === 'geraete') {
+    kopf = ['typ', 'bezeichnung', 'seriennummer', 'barcode', 'lagerplatz', 'status', 'naechste_pruefung', 'satz', 'bemerkung'];
+    daten = (zeilen || Z.daten.geraete).map((g) => {
+      const s = naechsteFaelligkeit(g.id);
+      return [typName(g.geraetetyp_id), g.bezeichnung, g.seriennummer, g.barcode, (Z.idx.ort.get(g.lagerplatz_id) || {}).code || '', g.status,
+        s ? s.naechste_faellig : '', g.satz_id ? Z.idx.satz.get(g.satz_id).name : '', g.bemerkung];
+    });
+  } else if (art === 'lagerplaetze') {
+    kopf = ['name', 'code', 'typ', 'gehoert_zu', 'geraete', 'zuletzt_gezaehlt'];
+    daten = Z.daten.lagerplaetze.map((o) => [o.name, o.code, o.typ, o.ober_id ? ortName(o.ober_id) : '', o.bestand, o.zuletzt_gezaehlt || '']);
+  } else if (art === 'faelligkeiten') {
+    kopf = ['geraet', 'barcode', 'typ', 'pruefplan', 'intervall', 'naechste_faelligkeit', 'zuletzt_geprueft', 'standort'];
+    daten = Z.daten.arbeitsliste.filter((a) => a.art === 'pruefung').sort((a, b) => a.tage - b.tage).map((a) => {
+      const g = Z.idx.geraet.get(a.geraet_id);
+      return [geraetTitel(g), g.barcode, typName(g.geraetetyp_id), (Z.idx.plan.get(a.plan_id) || {}).name, intervallText(a.intervall_wert, a.intervall_einheit), a.faellig, a.zuletzt || '', ortName(g.lagerplatz_id)];
+    });
+  } else {
+    kopf = ['typ', 'hersteller', 'modell', 'pruefplan', 'intervall_wert', 'intervall_einheit', 'schritte'];
+    daten = [];
+    Z.daten.typen.forEach((t) => {
+      const plaene = Z.daten.plaene.filter((p) => p.geraetetyp_id === t.id && !p.geraet_id);
+      if (!plaene.length) daten.push([t.name, t.hersteller, t.modell, '', '', '', '']);
+      plaene.forEach((p) => daten.push([t.name, t.hersteller, t.modell, p.name, p.intervall_wert, p.intervall_einheit,
+        Z.daten.schritte.filter((s) => s.pruefplan_id === p.id).sort((a, b) => a.position - b.position).map((s) => s.titel).join(' | ')]));
+    });
+  }
+  const text = [kopf].concat(daten).map((z) => z.map(csvZelle).join(';')).join('\r\n');
+  herunterladen(art + '_' + heute() + '.csv', 'text/csv', text);
+}
+
+/** CSV oder aus Excel kopierte Zellen (Tabulator) – der Trenner wird erraten. */
+function csvLesen(text) {
+  const erste = text.split(/\r?\n/)[0] || '';
+  const trenner = erste.indexOf('\t') >= 0 ? '\t' : (erste.split(';').length >= erste.split(',').length ? ';' : ',');
+  const zeilen = [];
+  let zeile = [];
+  let zelle = '';
+  let inAnf = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inAnf) {
+      if (c === '"' && text[i + 1] === '"') {
+        zelle += '"';
+        i++;
+      } else if (c === '"') inAnf = false;
+      else zelle += c;
+    } else if (c === '"') inAnf = true;
+    else if (c === trenner) {
+      zeile.push(zelle);
+      zelle = '';
+    } else if (c === '\n' || c === '\r') {
+      if (c === '\r' && text[i + 1] === '\n') i++;
+      zeile.push(zelle);
+      zeilen.push(zeile);
+      zeile = [];
+      zelle = '';
+    } else zelle += c;
+  }
+  if (zelle || zeile.length) {
+    zeile.push(zelle);
+    zeilen.push(zeile);
+  }
+  return zeilen.filter((z) => z.some((x) => String(x).trim()));
+}
+
+function seiteImport() {
+  const z = ui('import', { text: '', typenAnlegen: false, ergebnis: null });
+  const zeilen = z.text.trim() ? csvLesen(z.text.replace(/^﻿/, '')) : [];
+  const kopf = zeilen.length ? zeilen[0].map((k) => norm(k).replace(/\s+/g, '_')) : [];
+  const spalte = (namen) => kopf.findIndex((k) => namen.indexOf(k) >= 0);
+  const pos = {
+    typ: spalte(['typ', 'geraetetyp', 'gerätetyp', 'art']),
+    bezeichnung: spalte(['bezeichnung', 'name', 'kennung']),
+    seriennummer: spalte(['seriennummer', 'sn', 'serien-nr', 'seriennr']),
+    barcode: spalte(['barcode', 'code']),
+    lagerplatz: spalte(['lagerplatz', 'standort', 'ort']),
+    status: spalte(['status', 'zustand']),
+    bemerkung: spalte(['bemerkung', 'notiz', 'hinweis']),
+  };
+  const daten = zeilen.slice(1).map((r) => {
+    const o = {};
+    Object.keys(pos).forEach((k) => {
+      o[k] = pos[k] >= 0 ? String(r[pos[k]] || '').trim().replace(/^'(?=[=+\-@])/, '') : '';
+    });
+    const typ = Z.daten.typen.find((t) => norm(t.name) === norm(o.typ));
+    const ort = Z.daten.lagerplaetze.find((l) => norm(l.code) === norm(o.lagerplatz) || norm(l.name) === norm(o.lagerplatz));
+    o.hinweis = !o.typ ? 'Typ fehlt' : !typ && !z.typenAnlegen ? 'Typ unbekannt' : !ort ? 'Lagerplatz unbekannt' : '';
+    o.neuerTyp = !typ && !!o.typ;
+    return o;
+  });
+  const fehler = daten.filter((d) => d.hinweis).length;
+
+  return [
+    werkzeugleiste('Import & Export', 'Alles, was hier steht, liegt ohnehin in Ihrer Google-Tabelle. CSV ist für den Weg nach draußen – und für den Bestand, den es schon gibt.'),
+    h('div.raster',
+      h('div.karte',
+        h('div.karte-kopf', h('h2', 'Export (CSV)')),
+        h('div.karte-inhalt',
+          h('p.klein.gedimmt', 'Semikolon-getrennt, UTF-8 – öffnet in Excel und LibreOffice direkt richtig.'),
+          h('div.knopfreihe',
+            knopf('Geräte', 'download', () => csvExport('geraete')),
+            knopf('Lagerplätze', 'download', () => csvExport('lagerplaetze')),
+            knopf('Fälligkeiten', 'download', () => csvExport('faelligkeiten')),
+            knopf('Gerätetypen & Prüfpläne', 'download', () => csvExport('typen'))),
+          Z.daten.tabelleUrl ? h('p', { style: { marginTop: '16px', marginBottom: 0 } }, h('a', { href: Z.daten.tabelleUrl, target: '_blank' }, 'Google-Tabelle öffnen'), h('span.klein.gedimmt', ' – nur für den Eigentümer der Tabelle.')) : null)),
+      h('div.karte',
+        h('div.karte-kopf', h('h2', 'Geräte übernehmen')),
+        h('div.karte-inhalt',
+          h('p.klein', 'Zeilen aus Excel kopieren und hier einfügen – oder eine CSV-Datei öffnen. Erste Zeile: Spaltennamen. Erkannt werden ',
+            h('span.mono', 'typ, bezeichnung, seriennummer, barcode, lagerplatz, status, bemerkung'), '. Lagerplatz als Code oder Name; Barcode leer = automatisch.'),
+          h('textarea', { id: 'imp-text', rows: 7, value: z.text, placeholder: 'typ;bezeichnung;seriennummer;barcode;lagerplatz\nPressluftatmer;PA05;ARSN-1;;LOC-LAGER', style: { fontFamily: 'var(--mono)', fontSize: '13px' }, oninput: (e) => { z.text = e.target.value; z.ergebnis = null; zeichnen(); } }),
+          h('div.knopfreihe', { style: { marginTop: '10px' } },
+            h('label.btn.btn-klein', 'CSV-Datei öffnen …', h('input', {
+              type: 'file', accept: '.csv,text/csv,text/plain', style: { display: 'none' },
+              onchange: (e) => {
+                const datei = e.target.files[0];
+                if (!datei) return;
+                datei.text().then((t) => { z.text = t; zeichnen(); });
+              },
+            })),
+            h('label.haken', { style: { margin: 0 } }, h('input', { type: 'checkbox', checked: z.typenAnlegen, onchange: (e) => { z.typenAnlegen = e.target.checked; zeichnen(); } }), h('span.klein', 'Unbekannte Gerätetypen anlegen'))))),
+    ),
+    daten.length ? h('div.karte',
+      h('div.karte-kopf',
+        h('h2', 'Vorschau: ' + plural(daten.length, 'Zeile', 'Zeilen') + (fehler ? ', ' + fehler + ' mit Problemen' : '')),
+        h('button.btn.btn-primary', {
+          disabled: !!fehler,
+          onclick: async (e) => {
+            e.currentTarget.disabled = true;
+            try {
+              const r = await api('geraete.import', { zeilen: daten, typenAnlegen: z.typenAnlegen });
+              meldung.erfolg(plural(r.angelegt, 'Gerät', 'Geräte') + ' übernommen' + (r.typenNeu ? ', ' + plural(r.typenNeu, 'Gerätetyp', 'Gerätetypen') + ' neu' : '') + '.');
+              z.text = '';
+              zeichnen();
+            } catch (er) {
+              meldung.fehler(er);
+              zeichnen();
+            }
+          },
+        }, fehler ? 'Erst die Probleme beheben' : plural(daten.length, 'Gerät', 'Geräte') + ' übernehmen')),
+      pos.typ < 0 || pos.lagerplatz < 0 ? h('p.fehlertext', { style: { padding: '12px 20px' } }, 'Die Spalten „typ“ und „lagerplatz“ werden gebraucht – erste Zeile prüfen.') : null,
+      tabelle({
+        zustand: {},
+        schluessel: (d) => JSON.stringify(d),
+        zeilen: daten,
+        seite: 300,
+        spalten: [
+          { id: 'typ', titel: 'Typ', zelle: (d) => [d.typ || '–', d.neuerTyp && z.typenAnlegen ? h('span.badge.badge-blau', { style: { marginLeft: '6px' } }, 'neu') : null] },
+          { id: 'bez', titel: 'Bezeichnung', zelle: (d) => d.bezeichnung },
+          { id: 'sn', titel: 'Seriennr.', zelle: (d) => d.seriennummer },
+          { id: 'code', titel: 'Barcode', zelle: (d) => h('span.mono', d.barcode || 'automatisch') },
+          { id: 'ort', titel: 'Lagerplatz', zelle: (d) => d.lagerplatz },
+          { id: 'status', titel: 'Status', zelle: (d) => d.status || 'einsatzbereit' },
+          { id: 'hinweis', titel: 'Prüfung', zelle: (d) => (d.hinweis ? h('span.badge.badge-rot', d.hinweis) : h('span.badge.badge-gruen', 'ok')) },
+        ],
+      })) : null,
+  ];
+}
+
+// ─────────────────────────────── Regeln ───────────────────────────────
+
+function seiteRegeln() {
+  const admin = istAdmin();
+  const regeln = Z.daten.regeln.slice().sort((a, b) => a.position - b.position || vergleich(a.name, b.name));
+  return [
+    werkzeugleiste('Regeln', 'Was nach einer Buchung oder Prüfung von selbst passieren soll. Regeln laufen im Namen dessen, der gebucht hat.', [
+      admin ? knopf('Neue Regel', 'plus', () => regelFormular(null), 'btn-primary') : null,
+    ]),
+    h('div.karte', regeln.length ? regeln.map((r) => h('div.regel-karte' + (r.aktiv ? '' : '.aus'),
+      h('div.regel-text',
+        h('div', h('strong', r.name), ' ', r.aktiv ? h('span.badge.badge-gruen', 'aktiv') : h('span.badge.badge-grau', 'aus')),
+        r.beschreibung ? h('div.klein.gedimmt', r.beschreibung) : null,
+        h('div.regel-satz', regelSatz(r))),
+      admin ? h('div.knopfreihe',
+        h('button.btn.btn-klein', { onclick: () => sofort('regeln.speichern', Object.assign({}, r, { aktiv: !r.aktiv })) }, r.aktiv ? 'Ausschalten' : 'Einschalten'),
+        h('button.btn.btn-klein', { onclick: () => regelFormular(r) }, 'Bearbeiten'),
+        h('button.btn.btn-klein.btn-gefahr', {
+          onclick: async () => {
+            if (!(await bestaetigen({ titel: 'Regel „' + r.name + '“ löschen?', text: 'Was sie schon bewirkt hat, bleibt.', ja: 'Löschen', gefahr: true }))) return;
+            sofort('regeln.loeschen', { id: r.id }, 'Gelöscht.');
+          },
+        }, icon('muell', 14))) : null))
+      : h('div.leer', 'Keine Regeln. Beispiel: „Nach einem Einsatz wird die nächste Prüfung sofort fällig.“')),
+    !admin ? h('p.klein.gedimmt', { style: { marginTop: '14px' } }, 'Regeln ändern kann nur ein Administrator.') : null,
+  ];
+}
+
+// ─────────────────────────────── Einstellungen ───────────────────────────────
+
+/** Ein Logo auf Briefkopfgröße bringen – eine Zelle fasst 50 000 Zeichen. */
+function logoVerkleinern(datei) {
+  return new Promise((erfuellt, abgelehnt) => {
+    const bild = new Image();
+    bild.onload = () => {
+      const faktor = Math.min(1, 320 / bild.width, 160 / bild.height);
+      const c = document.createElement('canvas');
+      c.width = Math.round(bild.width * faktor);
+      c.height = Math.round(bild.height * faktor);
+      c.getContext('2d').drawImage(bild, 0, 0, c.width, c.height);
+      let url = c.toDataURL('image/png');
+      [0.9, 0.8, 0.65, 0.5].forEach((q) => {
+        if (url.length > 45000) {
+          const k = document.createElement('canvas');
+          k.width = c.width;
+          k.height = c.height;
+          const ctx = k.getContext('2d');
+          ctx.fillStyle = '#fff';
+          ctx.fillRect(0, 0, k.width, k.height);
+          ctx.drawImage(c, 0, 0);
+          url = k.toDataURL('image/jpeg', q);
+        }
+      });
+      if (url.length > 45000) abgelehnt(new Error('Das Bild bleibt auch verkleinert zu groß.'));
+      else erfuellt(url);
+    };
+    bild.onerror = () => abgelehnt(new Error('Das Bild ließ sich nicht lesen.'));
+    bild.src = URL.createObjectURL(datei);
+  });
+}
+
+function seiteEinstellungen() {
+  const admin = istAdmin();
+  const e = Z.daten.einstellungen;
+  const w = ui('einstellungen-werte', {});
+  Object.keys(e).forEach((k) => {
+    if (!(k in w)) w[k] = e[k];
+  });
+  const geaendert = Object.keys(e).filter((k) => String(w[k]) !== String(e[k]));
+  const fld = (k, titel, attrs, hinweis) => feld(titel, eingabe(w, k, Object.assign({ disabled: !admin, oninput: (ev) => { w[k] = ev.target.value; zeichnen(); } }, attrs || {})), hinweis);
+
+  const speichern = () => {
+    const werte = {};
+    geaendert.forEach((k) => {
+      werte[k] = w[k];
+    });
+    if (sofort('einstellungen.speichern', { werte: werte }, 'Einstellungen gespeichert.')) {
+      Z.ui['einstellungen-werte'] = null;
+      zeichnen();
+    }
+  };
+
+  return [
+    werkzeugleiste('Einstellungen', admin ? null : 'Ändern kann nur ein Administrator.', [
+      admin && geaendert.length ? h('button.btn', { onclick: () => { Z.ui['einstellungen-werte'] = null; zeichnen(); } }, 'Verwerfen') : null,
+      admin ? h('button.btn.btn-primary', { disabled: !geaendert.length, onclick: speichern }, geaendert.length ? 'Speichern (' + geaendert.length + ')' : 'Gespeichert') : null,
+    ]),
+    h('div.raster',
+      h('div.karte',
+        h('div.karte-kopf', h('h2', 'Wehr')),
+        h('div.karte-inhalt',
+          fld('wehr_name', 'Name der Wehr', null, 'Steht auf jedem Ausdruck und am Anmeldebildschirm.'),
+          fld('wehr_zusatz', 'Zusatz', { placeholder: 'z. B. Löschzug Mitte' }),
+          h('div.feld', h('span.klein.fett', 'Logo'),
+            h('div.knopfreihe', { style: { marginTop: '6px' } },
+              Z.daten.wehr.logo ? h('img', { src: Z.daten.wehr.logo, alt: 'Logo', style: { maxHeight: '48px', maxWidth: '120px', background: '#fff', borderRadius: '6px', padding: '4px', border: '1px solid var(--n-200)' } }) : h('span.klein.gedimmt', 'keines – die Flamme steht dafür'),
+              admin ? h('label.btn.btn-klein', 'Bild wählen …', h('input', {
+                type: 'file', accept: 'image/png,image/jpeg', style: { display: 'none' },
+                onchange: async (ev) => {
+                  const datei = ev.target.files[0];
+                  if (!datei) return;
+                  try {
+                    sofort('einstellungen.logo', { logo: await logoVerkleinern(datei) }, 'Logo gespeichert.');
+                  } catch (er) {
+                    meldung.fehler(er);
+                  }
+                },
+              })) : null,
+              admin && Z.daten.wehr.logo ? h('button.btn.btn-klein.btn-gefahr', { onclick: () => sofort('einstellungen.logo', { logo: '' }) }, 'Entfernen') : null)))),
+      h('div.karte',
+        h('div.karte-kopf', h('h2', 'Betrieb')),
+        h('div.karte-inhalt',
+          fld('vorwarnung_pruefung_tage', 'Vorwarnzeit für Prüfungen (Tage)', { type: 'number', min: 1, max: 365 }, 'So weit im Voraus erscheint eine Prüfung in der Aktionsliste.'),
+          feld('Nicht gefundene Geräte bei der Inventur umbuchen nach', h('select', { id: 'f-vermisst', disabled: !admin, onchange: (ev) => { w.inventur_vermisst_code = ev.target.value; zeichnen(); } },
+            [h('option', { value: '' }, '– nicht umbuchen –')].concat(sortiertNachName(Z.daten.lagerplaetze).map((o) => h('option', { value: o.code, selected: w.inventur_vermisst_code === o.code }, o.name + ' (' + o.code + ')')))),
+          'Mit einem Platz „Vermisst“ behauptet der Bestand nach einem Zählgang nichts mehr, was gerade widerlegt wurde. Je Gang abwählbar.'))),
+      h('div.karte',
+        h('div.karte-kopf', h('h2', 'Personal')),
+        h('div.karte-inhalt',
+          feld('Personalmodul', h('select', { id: 'f-modul-personal', disabled: !admin, onchange: (ev) => { w.modul_personal = ev.target.value; zeichnen(); } },
+            [['ja', 'eingeschaltet'], ['nein', 'ausgeschaltet']].map((o) => h('option', { value: o[0], selected: w.modul_personal === o[0] }, o[1]))),
+          'Qualifikationen und Atemschutztauglichkeit (G26.3). Sehen und erfassen dürfen Gerätewart, Kommandant und Administrator – nie am Hallengerät.'),
+          w.modul_personal !== 'nein'
+            ? fld('vorwarnung_personal_tage', 'Vorwarnzeit für Nachweise (Tage)', { type: 'number', min: 1, max: 365 }, 'So weit im Voraus erscheint ein ablaufender Nachweis in der Aktionsliste.')
+            : null)),
+      h('div.karte',
+        h('div.karte-kopf', h('h2', 'Barcodes')),
+        h('div.karte-inhalt',
+          h('p.klein.gedimmt', 'Anfang der automatisch vergebenen Codes. Bereits vergebene bleiben, wie sie sind.'),
+          h('div.zeile', fld('barcode_praefix_geraete', 'Geräte'), fld('barcode_praefix_lagerplaetze', 'Lagerplätze'), fld('barcode_praefix_saetze', 'Sätze')))),
+      h('div.karte',
+        h('div.karte-kopf', h('h2', 'Mein Konto')),
+        h('div.karte-inhalt',
+          h('p', h('strong', Z.daten.ich.name), h('span.gedimmt', ' · ' + ROLLE_TEXT[Z.daten.ich.rolle])),
+          h('div.detail-raster',
+            h('div.detail-feld', h('span', 'Firmenkonto'), h('strong', Z.daten.ich.email)),
+            h('div.detail-feld', h('span', 'Kürzel'), h('strong', Z.daten.ich.kuerzel || '–'))),
+          h('p.klein.gedimmt', 'Angemeldet über Google. Kürzel und Ausweis gelten nur an Hallengeräten.'),
+          h('button.btn', { onclick: themaWechseln }, 'Thema: ' + { system: 'wie das System', light: 'hell', dark: 'dunkel' }[Ablage.lesen('thema', 'system')])))),
+    admin ? h('div.karte',
+      h('div.karte-kopf',
+        h('div', h('h2', 'Fahrzeughalle – angemeldete Geräte'), h('div.klein.gedimmt', 'An diesen Geräten meldet man sich mit Ausweis oder Kürzel an. Ein verlorenes Gerät: sperren – die Ausweise der Mannschaft bleiben gültig.')),
+        h('div.knopfreihe',
+          h('button.btn', { onclick: hallengeraetFormular, title: 'Das Gerät, an dem Sie gerade sitzen' }, icon('halle', 15), 'Dieses Gerät'),
+          h('button.btn.btn-primary', { onclick: kopplungFormular, title: 'Ein Tablet, das mit einem Konto ohne Mitgliedschaft angemeldet ist' }, icon('plus', 15), 'Gerät koppeln'))),
+      tabelle({
+        zustand: {},
+        schluessel: (g) => g.id,
+        zeilen: Z.daten.hallengeraete,
+        leer: 'Noch kein Hallengerät. „Gerät koppeln“ erzeugt einen Code, mit dem sich das Tablet in der Halle selbst einrichtet.',
+        spalten: [
+          { id: 'name', titel: 'Gerät', zelle: (g) => [h('strong', g.name), h('div.klein.gedimmt', 'angemeldet ' + datum(g.angelegt_am) + ' von ' + (g.angelegt_von || '–'))] },
+          { id: 'art', titel: 'Art', zelle: (g) => (g.geteilt ? 'geteilt · Abmeldung nach ' + g.abmelden_nach_min + ' min' : 'persönlich') },
+          { id: 'anmeldung', titel: 'Anmeldung mit', zelle: (g) => h('span.klein', g.kuerzel_erlaubt ? 'Ausweis oder Kürzel' : 'nur Ausweis') },
+          { id: 'zuletzt', titel: 'Zuletzt genutzt', zelle: (g) => h('span.klein', g.zuletzt_genutzt ? datumZeit(g.zuletzt_genutzt) : 'noch nie') },
+          { id: 'zustand', titel: 'Zustand', zelle: (g) => (g.gesperrt ? h('span.badge.badge-rot', 'gesperrt') : h('span.badge.badge-gruen', 'aktiv')) },
+        ],
+        aktion: (g) => [
+          h('button.btn.btn-klein', {
+            title: g.kuerzel_erlaubt ? 'Nur noch Ausweis – laufende Kürzel-Sitzungen enden' : 'Auch das Kürzel zulassen',
+            onclick: () => sofort('hallengeraet.aendern', { id: g.id, kuerzel_erlaubt: !g.kuerzel_erlaubt },
+              g.kuerzel_erlaubt ? 'An „' + g.name + '“ gilt jetzt nur noch der Ausweis.' : 'An „' + g.name + '“ geht jetzt auch das Kürzel.'),
+          }, g.kuerzel_erlaubt ? 'Nur Ausweis' : 'Kürzel zulassen'),
+          h('button.btn.btn-klein' + (g.gesperrt ? '' : '.btn-gefahr'), { onclick: () => sofort('hallengeraet.aendern', { id: g.id, gesperrt: !g.gesperrt }, g.gesperrt ? 'Entsperrt.' : 'Gesperrt – laufende Sitzungen enden.') }, g.gesperrt ? 'Entsperren' : 'Sperren'),
+          h('button.btn.btn-klein.btn-gefahr', {
+            onclick: async () => {
+              if (!(await bestaetigen({ titel: '„' + g.name + '“ entfernen?', text: 'Das Gerät muss danach neu angemeldet werden.', ja: 'Entfernen', gefahr: true }))) return;
+              sofort('hallengeraet.loeschen', { id: g.id }, 'Entfernt.');
+            },
+          }, icon('muell', 14)),
+        ],
+      })) : null,
+    h('p.klein.gedimmt', { style: { marginTop: '18px' } }, 'FeuerwehrManager ' + Z.daten.version + ' · Google Apps Script · Datenstand ' + datum(Z.daten.heute)),
+  ];
+}
+</script>

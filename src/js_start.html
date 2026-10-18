@@ -1,0 +1,206 @@
+<script>
+/**
+ * Start: wer bin ich, die Weiche zwischen Schreibtisch und Halle, und `zeichnen()`.
+ *
+ * Am Schreibtisch gibt es keine Anmeldung – das Firmenkonto bei Google ist sie. Der
+ * Browser fragt einfach nach dem Datenstand; antwortet der Server mit `kein_zugang`, ist
+ * das Konto kein Mitglied.
+ *
+ * Ein als **Hallengerät** angemeldeter Browser fragt Google gar nicht erst: Das Tablet
+ * an der Wand ist mit irgendeinem Konto angemeldet, aber nicht mit dem des Trupps davor.
+ * Dort zählt nur, wer Ausweis oder Kürzel eingibt.
+ */
+'use strict';
+
+/** Die eine Stelle, die entscheidet, was gerade zu sehen ist. */
+function zeichnen() {
+  const app = document.getElementById('app');
+  if (!app) return;
+  if (!Z.daten) {
+    document.body.classList.remove('halle-aktiv');
+    if (Z.start.eingerichtet === false) nichtEingerichtetZeichnen(app);
+    else if (Ablage.lesen('hallengeraet') && !Z.token) halleAnmeldungZeichnen(app);
+    else if (Z.keinZugang) keinZugangZeichnen(app);
+    else if (Z.startFehler) {
+      app.replaceChildren(rahmenAnmeldung(h('div.fehlerbox', h('span', Z.startFehler)),
+        h('button.btn.btn-primary.btn-block', { onclick: () => location.reload() }, 'Erneut versuchen')));
+    } else app.replaceChildren(h('div.laden', 'Lädt …'));
+    return;
+  }
+  const teile = Router.teile();
+  if (Z.daten.ich.art === 'halle' && teile[0] !== 'halle') {
+    gehe('/halle', true);
+    return;
+  }
+  if (teile[0] === 'halle') halleZeichnen(app);
+  else {
+    document.body.classList.remove('halle-aktiv');
+    kameraStoppen();
+    schreibtischZeichnen(app);
+  }
+}
+
+/** Telefon in der Halle oder Schreibtisch? Erst die getroffene Wahl, dann das Gerät. */
+function weiche() {
+  if (!Z.daten || Z.pfad !== '/') return;
+  const gemerkt = Ablage.lesen('halle');
+  // `pointer: coarse` gehört dazu: Sonst landete jedes schmal gezogene Fenster in der Halle.
+  const telefon = window.matchMedia('(max-width: 640px) and (pointer: coarse)').matches;
+  if (Z.daten.ich.art === 'halle' || gemerkt === true || (gemerkt === null && telefon)) gehe('/halle', true);
+}
+
+/**
+ * Den Datenstand holen – mit Hallen-Token, wenn es eines gibt, sonst als Google-Konto.
+ * Erst danach weiß der Browser, wer er ist, und schickt, was von diesem Menschen noch in
+ * der Warteschlange liegt.
+ */
+async function laden() {
+  Z.keinZugang = null;
+  Z.startFehler = null;
+  zeichnen();
+  try {
+    basisSetzen(await api('daten.laden', {}, { sofort: true }));
+    Sync.senden();
+    weiche();
+  } catch (e) {
+    if (e.code === 'kein_zugang' || e.code === 'abgemeldet') return;
+    Z.startFehler = e.message;
+    zeichnen();
+  }
+}
+
+function rahmenAnmeldung(...inhalt) {
+  return h('div.anmeldung', h('div.anmeldung-karte',
+    h('div.anmeldung-marke',
+      wehrLogo('anmeldung-logo', 34),
+      h('div.anmeldung-titel', Z.start.wehr_name || 'FeuerwehrManager'),
+      h('div.anmeldung-unter', Z.start.wehr_zusatz || 'Lager & Prüfwesen')),
+    inhalt,
+    h('div.anmeldung-fuss', 'FeuerwehrManager ' + (Z.start.version || ''))));
+}
+
+function nichtEingerichtetZeichnen(app) {
+  app.replaceChildren(rahmenAnmeldung(
+    h('div.hinweisbox', h('span', 'Die Anwendung ist noch nicht eingerichtet.')),
+    h('p.klein', 'In der Google-Tabelle, zu der dieses Skript gehört: Menü „🚒 FeuerwehrManager → Einrichten“, danach „Administrator eintragen …“. Dann diese Seite neu laden.')));
+}
+
+/**
+ * Das Google-Konto ist kein Mitglied. Zwei Auswege: ein Administrator nimmt es auf –
+ * oder dieses Gerät ist das Tablet in der Halle und wird mit einem Kopplungscode zum
+ * Hallengerät. Genau dafür ist der Code da: Hier kommt niemand in die Einstellungen.
+ */
+function keinZugangZeichnen(app) {
+  const k = Z.kopplung || (Z.kopplung = { offen: false, code: '', fehler: '', laeuft: false });
+  const koppeln = async (ev) => {
+    ev.preventDefault();
+    if (k.laeuft) return;
+    k.laeuft = true;
+    k.fehler = '';
+    zeichnen();
+    try {
+      const geheimnis = geraeteGeheimnis();
+      const r = await api('halle.koppeln', { code: k.code, geheimnis: geheimnis }, { sofort: true });
+      Ablage.schreiben('hallengeraet', geheimnis);
+      Ablage.schreiben('hallengeraet.name', r.name);
+      Ablage.schreiben('hallengeraet.kuerzel', r.kuerzel_erlaubt);
+      Z.kopplung = null;
+      Z.keinZugang = null;
+      meldung.erfolg('Dieses Gerät ist jetzt „' + r.name + '“.');
+      zeichnen();
+      return;
+    } catch (e) {
+      k.fehler = e.message;
+    }
+    k.laeuft = false;
+    zeichnen();
+  };
+  mitFokus(() => app.replaceChildren(rahmenAnmeldung(
+    h('div.hinweisbox', h('span', Z.keinZugang)),
+    h('p.klein.gedimmt', 'Mit einem anderen Firmenkonto? Im Browser bei Google abmelden oder ein privates Fenster öffnen und die Adresse erneut aufrufen.'),
+    k.offen
+      ? h('form', { onsubmit: koppeln, style: { marginTop: '16px' } },
+        h('h3', { style: { marginBottom: '6px' } }, 'Als Hallengerät einrichten'),
+        h('p.klein.gedimmt', 'Den Kopplungscode erzeugt ein Administrator am Schreibtisch: Einstellungen → Fahrzeughalle → „Gerät koppeln“.'),
+        k.fehler ? h('p.fehlertext', { role: 'alert' }, k.fehler) : null,
+        feld('Kopplungscode', h('input', { id: 'kopplungscode', value: k.code, placeholder: 'ABCD-EFGH', autocomplete: 'off', autocapitalize: 'characters', style: { fontFamily: 'var(--mono)', fontSize: '18px', letterSpacing: '0.08em' }, oninput: (e) => { k.code = e.target.value; } })),
+        h('button.btn.btn-primary.btn-block', { type: 'submit', disabled: k.laeuft, style: { minHeight: '46px' } }, k.laeuft ? 'Koppelt …' : 'Koppeln'))
+      : h('div', { style: { textAlign: 'center', marginTop: '14px' } },
+        h('button.btn.btn-text', { onclick: () => { k.offen = true; zeichnen(); } }, 'Dieses Gerät als Hallengerät einrichten …')))));
+}
+
+/** Am Hallengerät: Ausweis scannen oder Kürzel eintippen – ein Feld für beides. */
+function halleAnmeldungZeichnen(app) {
+  const a = Z.hallenAnmeldung || (Z.hallenAnmeldung = { fehler: '', laeuft: false });
+  const geraet = Ablage.lesen('hallengeraet');
+  const mitKuerzel = Ablage.lesen('hallengeraet.kuerzel', true) !== false;
+  const anmelden = async (code) => {
+    if (a.laeuft) return;
+    a.laeuft = true;
+    a.fehler = '';
+    zeichnen();
+    try {
+      await api('halle.anmelden', { geraet: geraet, code: code }, { sofort: true });
+      Z.hallenAnmeldung = null;
+      Z.halle = null;
+      gehe('/halle', true);
+      zeichnen();
+      return;
+    } catch (e) {
+      piepFehler();
+      a.fehler = e.message;
+      if (e.code === 'geraet_unbekannt') {
+        // Gesperrt oder entfernt: Dann ist dieser Browser kein Hallengerät mehr, und es
+        // gilt wieder das Google-Konto.
+        ['hallengeraet', 'hallengeraet.name', 'hallengeraet.kuerzel'].forEach((k) => Ablage.entfernen(k));
+        Z.hallenAnmeldung = null;
+        meldung.info(e.message);
+        laden();
+        return;
+      }
+    }
+    a.laeuft = false;
+    zeichnen();
+  };
+  if (!a.scanner) {
+    a.scanner = scanner({
+      id: 'ausweis-scan',
+      platzhalter: mitKuerzel ? 'Ausweis scannen oder Kürzel eintippen' : 'Ausweis scannen',
+      fokus: true,
+      hinweisOhneKamera: false,
+      beiCode: (c) => a.ziel(c),
+    });
+  }
+  a.ziel = anmelden;
+  mitFokus(() => app.replaceChildren(rahmenAnmeldung(
+    h('h2', { style: { textAlign: 'center', marginBottom: '6px' } }, Ablage.lesen('hallengeraet.name') || 'Fahrzeughalle'),
+    h('p.klein.gedimmt', { style: { textAlign: 'center' } }, mitKuerzel
+      ? 'Ausweis vor die Kamera oder den Handscanner halten – oder das eigene Kürzel eintippen und „Enter“.'
+      : 'Ausweis vor die Kamera oder den Handscanner halten.'),
+    a.fehler ? h('p.fehlertext', { role: 'alert', style: { textAlign: 'center' } }, a.fehler) : null,
+    a.laeuft ? h('div.laden', 'Prüft …') : a.scanner)));
+}
+
+async function starten() {
+  themaAnwenden();
+  Z.token = Ablage.lesen('sitzung');
+  window.matchMedia('(max-width: 1100px)').addEventListener('change', () => {
+    Z.leiste = undefined;
+    if (Z.daten) zeichnen();
+  });
+  Sync.laden();
+  setInterval(nachfragen, SYNC_TAKT);
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) nachfragen();
+  });
+  Router.start(() => {
+    if (Z.start.eingerichtet === false || (Ablage.lesen('hallengeraet') && !Z.token)) {
+      zeichnen();
+      return;
+    }
+    laden();
+  });
+}
+
+starten();
+</script>

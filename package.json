@@ -1,0 +1,16 @@
+{
+  "name": "feuerwehrmanager-appscript",
+  "version": "0.3.0",
+  "private": true,
+  "description": "Lager- und Prüfverwaltung für eine Feuerwehr – Google-Tabelle + Apps Script, ohne Bibliotheken",
+  "scripts": {
+    "test": "node test/server.mjs && node test/oberflaeche.mjs",
+    "test:server": "node test/server.mjs",
+    "test:oberflaeche": "node test/oberflaeche.mjs",
+    "vorschau": "node test/vorschau.mjs",
+    "push": "clasp push"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

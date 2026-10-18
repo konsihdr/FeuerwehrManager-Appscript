@@ -1,0 +1,799 @@
+<script>
+/**
+ * Grundlagen der Oberfläche: DOM-Bau, Zustand, Formate, Server, Meldungen, Dialoge,
+ * Adresse.
+ *
+ * Kein Framework, keine Bibliothek. Die Oberfläche ist eine Handvoll Funktionen, die
+ * aus dem Datenstand DOM bauen, und ein `zeichnen()`, das die aktuelle Seite neu
+ * aufbaut, wenn sich der Stand ändert. Für eine Anwendung dieser Größe reicht das –
+ * und es gibt nichts, was veraltet, bevor die Wehr es merkt.
+ */
+'use strict';
+
+// ─────────────────────────────── DOM ───────────────────────────────
+
+const EIGENSCHAFTEN = { value: 1, checked: 1, disabled: 1, selected: 1, multiple: 1, indeterminate: 1, readOnly: 1 };
+
+/**
+ * `h('button.btn.btn-primary', { onclick }, 'Speichern')`.
+ * Text wird immer als Text eingesetzt, nie als HTML – was ein Mitglied in ein Feld
+ * tippt, kann so nicht zu Markup werden.
+ */
+function h(tag, attrs, ...kinder) {
+  const teile = tag.split(/(?=[.#])/);
+  const el = document.createElement(teile[0] || 'div');
+  teile.slice(1).forEach((t) => {
+    if (t[0] === '.') el.classList.add(t.slice(1));
+    else el.id = t.slice(1);
+  });
+  if (attrs !== null && attrs !== undefined && (typeof attrs !== 'object' || attrs instanceof Node || Array.isArray(attrs))) {
+    kinder.unshift(attrs);
+    attrs = null;
+  }
+  if (attrs) {
+    Object.keys(attrs).forEach((k) => {
+      const v = attrs[k];
+      if (v === undefined || v === null || v === false) return;
+      if (k === 'class') String(v).split(/\s+/).filter(Boolean).forEach((c) => el.classList.add(c));
+      else if (k === 'style' && typeof v === 'object') Object.assign(el.style, v);
+      else if (k.indexOf('on') === 0 && typeof v === 'function') el.addEventListener(k.slice(2), v);
+      else if (EIGENSCHAFTEN[k]) el[k] = v;
+      else el.setAttribute(k, v === true ? '' : String(v));
+    });
+  }
+  anhaengen(el, kinder);
+  return el;
+}
+
+function anhaengen(el, kinder) {
+  kinder.forEach((k) => {
+    if (k === null || k === undefined || k === false || k === true) return;
+    if (Array.isArray(k)) anhaengen(el, k);
+    else el.append(k instanceof Node ? k : document.createTextNode(String(k)));
+  });
+  return el;
+}
+
+function flach(x) {
+  if (x === null || x === undefined || x === false) return [];
+  return Array.isArray(x) ? x.flat(Infinity).filter((k) => k !== null && k !== undefined && k !== false) : [x];
+}
+
+/** Neu zeichnen, ohne dem Anwender den Cursor aus dem Feld zu reißen. */
+function mitFokus(arbeit) {
+  const a = document.activeElement;
+  const id = a && a.id;
+  let von = null;
+  let bis = null;
+  try {
+    von = a.selectionStart;
+    bis = a.selectionEnd;
+  } catch (e) {
+    // kein Textfeld
+  }
+  arbeit();
+  if (!id) return;
+  const neu = document.getElementById(id);
+  if (neu && neu !== a) {
+    neu.focus({ preventScroll: true });
+    try {
+      if (von !== null) neu.setSelectionRange(von, bis);
+    } catch (e) {
+      // nichts
+    }
+  }
+}
+
+// ─────────────────────────────── Zustand ───────────────────────────────
+
+const Z = {
+  start: window.START || {},
+  token: null,
+  // `basis` ist der letzte Stand des Servers, `daten` das, was angezeigt wird: die Basis
+  // plus alle eigenen Änderungen, die noch unterwegs sind (`js_sync.html`).
+  basis: null,
+  daten: null,
+  idx: null,
+  keinZugang: null, // Meldung, wenn das Google-Konto kein Mitglied ist
+  pfad: '/',
+  ui: {},
+  laufend: 0,
+};
+
+/** Seitenzustand (Filter, Sortierung, gewählte Zeilen) – übersteht das Neuzeichnen. */
+function ui(seite, vorgabe) {
+  if (!Z.ui[seite]) Z.ui[seite] = Object.assign({}, vorgabe || {});
+  return Z.ui[seite];
+}
+
+const Ablage = {
+  lesen(k, vorgabe) {
+    try {
+      const v = localStorage.getItem('fwm.' + k);
+      return v === null ? (vorgabe === undefined ? null : vorgabe) : JSON.parse(v);
+    } catch (e) {
+      return vorgabe === undefined ? null : vorgabe;
+    }
+  },
+  schreiben(k, v) {
+    try {
+      localStorage.setItem('fwm.' + k, JSON.stringify(v));
+    } catch (e) {
+      // Privates Fenster oder gesperrter Speicher: Dann gilt es eben nur bis zum Neuladen.
+    }
+  },
+  entfernen(k) {
+    try {
+      localStorage.removeItem('fwm.' + k);
+    } catch (e) {
+      // nichts
+    }
+  },
+};
+
+// ─────────────────────────────── Formate ───────────────────────────────
+
+const STATUS_TEXT = {
+  einsatzbereit: 'Einsatzbereit',
+  zu_reinigen: 'Zu reinigen',
+  zur_pruefung: 'Zur Prüfung',
+  defekt: 'Defekt',
+  ausgemustert: 'Ausgemustert',
+};
+const STATUS_FARBE = {
+  einsatzbereit: 'badge-gruen',
+  zu_reinigen: 'badge-blau',
+  zur_pruefung: 'badge-gelb',
+  defekt: 'badge-rot',
+  ausgemustert: 'badge-grau',
+};
+const ALLE_STATUS = Object.keys(STATUS_TEXT);
+const ORT_TYP_TEXT = { lager: 'Lager', fahrzeug: 'Fahrzeug', werkstatt: 'Werkstatt', sonstige: 'Sonstige' };
+const EINHEIT_TEXT = { tage: 'Tage', monate: 'Monate', jahre: 'Jahre' };
+const ROLLE_TEXT = { mitglied: 'Mitglied', geraetewart: 'Gerätewart', kommandant: 'Kommandant', admin: 'Administrator' };
+const ROLLE_FARBE = { admin: 'badge-rot', kommandant: 'badge-gelb', geraetewart: 'badge-blau', mitglied: 'badge-grau' };
+const SCHRITT_ART_TEXT = { haken: 'Haken', messwert: 'Messwert', text: 'Freitext' };
+// Wie in `00_Schema.js`. Entschieden wird dort – hier geht es nur darum, niemandem eine
+// Tür zu zeigen, die für ihn verschlossen ist.
+const TECHNIK = ['geraetewart', 'admin'];
+const PERSONAL = ['geraetewart', 'kommandant', 'admin'];
+const FUEHRUNG = ['kommandant', 'admin'];
+const VERWALTUNG = ['geraetewart', 'kommandant', 'admin'];
+
+function darf(...rollen) {
+  const ich = Z.daten && Z.daten.ich;
+  return !!ich && rollen.indexOf(ich.rolle) >= 0;
+}
+const istTechnik = () => darf(...TECHNIK);
+const istAdmin = () => darf('admin');
+/** Personal sehen und erfassen – nur, wenn der Server die Daten auch geschickt hat. */
+const istPersonal = () => darf(...PERSONAL) && !!(Z.daten && Z.daten.nachweise);
+const istFuehrung = () => darf(...FUEHRUNG) && !!(Z.daten && Z.daten.nachweise);
+
+function heute() {
+  if (Z.daten && Z.daten.heute) return Z.daten.heute;
+  const d = new Date();
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+}
+
+function datum(iso) {
+  if (!iso) return '–';
+  const t = String(iso).slice(0, 10).split('-');
+  return t.length === 3 ? t[2] + '.' + t[1] + '.' + t[0] : String(iso);
+}
+
+function datumZeit(iso) {
+  if (!iso) return '–';
+  const d = new Date(iso);
+  if (isNaN(d)) return String(iso);
+  return d.toLocaleString('de-DE', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+
+function tageBis(iso) {
+  return tageZwischen_(heute(), iso);
+}
+
+function faelligText(tage) {
+  if (tage === null || tage === undefined) return 'kein Termin';
+  if (tage < -1) return -tage + ' Tage überfällig';
+  if (tage === -1) return 'seit gestern fällig';
+  if (tage === 0) return 'heute fällig';
+  if (tage === 1) return 'morgen fällig';
+  return 'in ' + tage + ' Tagen';
+}
+
+function intervallText(wert, einheit) {
+  if (!wert) return '–';
+  if (wert === 1) return einheit === 'tage' ? 'täglich' : einheit === 'monate' ? 'monatlich' : 'jährlich';
+  return 'alle ' + wert + ' ' + (EINHEIT_TEXT[einheit] || einheit);
+}
+
+function plural(n, eins, mehr) {
+  return n + ' ' + (n === 1 ? eins : mehr);
+}
+
+function norm(text) {
+  return String(text == null ? '' : text).trim().toLowerCase();
+}
+
+function vergleich(a, b) {
+  if (a === b) return 0;
+  if (a === null || a === undefined || a === '') return 1;
+  if (b === null || b === undefined || b === '') return -1;
+  if (typeof a === 'number' && typeof b === 'number') return a - b;
+  return String(a).localeCompare(String(b), 'de', { numeric: true, sensitivity: 'base' });
+}
+
+function geraetTitel(g) {
+  if (!g) return '–';
+  const typ = Z.idx && Z.idx.typ.get(g.geraetetyp_id);
+  return g.bezeichnung || (typ ? typ.name : '') || g.barcode;
+}
+
+function ortName(id) {
+  const o = Z.idx && Z.idx.ort.get(id);
+  return o ? o.name : '–';
+}
+
+function typName(id) {
+  const t = Z.idx && Z.idx.typ.get(id);
+  return t ? t.name : '–';
+}
+
+function initialen(name) {
+  return String(name || '')
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((t) => t[0].toUpperCase())
+    .join('');
+}
+
+// ─────────────────────────────── Datenstand ───────────────────────────────
+
+/**
+ * Den Stand übernehmen und die Nachschlagetabellen bauen. Danach zeichnen sich die
+ * Seite und alle offenen Dialoge, die darum gebeten haben, neu.
+ */
+function datenSetzen(stand) {
+  Z.daten = stand;
+  Z.keinZugang = null;
+  const karte = (liste) => new Map(liste.map((x) => [x.id, x]));
+  const idx = {
+    geraet: karte(stand.geraete),
+    ort: karte(stand.lagerplaetze),
+    typ: karte(stand.typen),
+    plan: karte(stand.plaene),
+    grund: karte(stand.gruende),
+    satz: karte(stand.saetze),
+    satzart: karte(stand.satzarten),
+    mitglied: karte(stand.mitglieder),
+    qualiart: karte(stand.qualiarten || []),
+    code: new Map(),
+    standVon: new Map(),
+    geraeteAn: new Map(),
+  };
+  stand.lagerplaetze.forEach((l) => l.code && idx.code.set(norm(l.code), { art: 'ort', id: l.id }));
+  stand.saetze.forEach((s) => s.barcode && idx.code.set(norm(s.barcode), { art: 'satz', id: s.id }));
+  stand.geraete.forEach((g) => {
+    // Ein gerade angelegtes Gerät hat seinen Barcode erst, wenn der Server geantwortet hat.
+    if (g.barcode) idx.code.set(norm(g.barcode), { art: 'geraet', id: g.id });
+    const liste = idx.geraeteAn.get(g.lagerplatz_id) || [];
+    liste.push(g);
+    idx.geraeteAn.set(g.lagerplatz_id, liste);
+  });
+  // Die eigene Bezeichnung („PA01“) taugt zum Eintippen – aber ein echter Code geht vor.
+  stand.geraete.forEach((g) => {
+    if (g.bezeichnung && !idx.code.has(norm(g.bezeichnung))) idx.code.set(norm(g.bezeichnung), { art: 'geraet', id: g.id });
+  });
+  stand.stand.forEach((s) => {
+    const liste = idx.standVon.get(s.geraet_id) || [];
+    liste.push(s);
+    idx.standVon.set(s.geraet_id, liste);
+  });
+  Z.idx = idx;
+  Z.start.wehr_name = stand.wehr.name;
+  Z.start.logo = stand.wehr.logo;
+  document.title = (stand.wehr.name ? stand.wehr.name + ' · ' : '') + 'FeuerwehrManager';
+  if (typeof zeichnen === 'function') zeichnen();
+  DIALOGE.forEach((d) => {
+    if (d.zu || !d.lebendig) return;
+    if (d.opt.beiDaten) d.opt.beiDaten(d);
+    else d.neu();
+  });
+}
+
+/** Ein gescannter oder getippter Code: Gerät, Lagerplatz oder Satz? */
+function aufloesen(code) {
+  const t = Z.idx && Z.idx.code.get(norm(code));
+  if (!t) return null;
+  const quelle = { geraet: Z.idx.geraet, ort: Z.idx.ort, satz: Z.idx.satz }[t.art];
+  const obj = quelle.get(t.id);
+  return obj ? { art: t.art, id: t.id, obj: obj } : null;
+}
+
+// ─────────────────────────────── Server ───────────────────────────────
+
+class ApiFehler extends Error {
+  constructor(text, code) {
+    super(text);
+    this.code = code || 'fehler';
+  }
+}
+
+function fortschritt() {
+  const el = document.getElementById('fortschritt');
+  if (el) el.classList.toggle('an', Z.laufend > 0);
+}
+
+function tokenSetzen(token) {
+  Z.token = token;
+  if (token) Ablage.schreiben('sitzung', token);
+  else Ablage.entfernen('sitzung');
+}
+
+/**
+ * Ein Aufruf an den Server – immer an `aufruf()`, die eine Tür.
+ *
+ * Für alles, dessen Antwort man braucht, bevor es weitergeht (Ausweis, Kopplungscode,
+ * PDF, Akte). Änderungen gehen sonst über `Sync.tun` und warten auf nichts. Damit beide
+ * Wege nicht durcheinanderkommen, wartet `api()` vorher, bis die Schlange leer ist – der
+ * Ausweis für ein Mitglied, das gerade erst angelegt wurde, käme sonst vor dem Mitglied
+ * an. `sofort: true` überspringt das (Laden, Abfragen).
+ *
+ * Mit dabei ist nur das Token einer Hallensitzung; am Schreibtisch weiß der Server aus
+ * dem Google-Konto, wer anruft. Bringt die Antwort einen neuen Datenstand mit, wird er die
+ * neue Basis – es sei denn, inzwischen kam schon ein jüngerer an. Eine abgelaufene
+ * Hallensitzung führt zurück zum Ausweis, ein Konto ohne Mitgliedschaft zur Meldung
+ * „kein Zugang“ – von jeder Stelle aus.
+ */
+async function api(name, args, optionen) {
+  const o = optionen || {};
+  if (!o.sofort) await Sync.abwarten();
+  const still = o.still;
+  const epoche = Sync.epoche;
+  return new Promise((erfuellt, abgelehnt) => {
+    if (!still) {
+      Z.laufend++;
+      fortschritt();
+    }
+    const fertig = () => {
+      if (!still) {
+        Z.laufend--;
+        fortschritt();
+      }
+    };
+    google.script.run
+      .withSuccessHandler((text) => {
+        fertig();
+        let a;
+        try {
+          a = JSON.parse(text);
+        } catch (e) {
+          abgelehnt(new ApiFehler('Unlesbare Antwort vom Server.', 'intern'));
+          return;
+        }
+        if (!a.ok) {
+          const f = new ApiFehler(a.fehler, a.code);
+          if (a.code === 'abgemeldet' && Z.token) sitzungVerloren(a.fehler);
+          if (a.code === 'kein_zugang') keinZugangSetzen(a.fehler);
+          abgelehnt(f);
+          return;
+        }
+        if (a.ergebnis && a.ergebnis.token) tokenSetzen(a.ergebnis.token);
+        if (a.stand) {
+          if (!Z.basis || (a.ergebnis && a.ergebnis.token) || epoche === Sync.epoche) basisSetzen(a.stand);
+          else nachfragenBald();
+          Sync.senden();
+        }
+        erfuellt(a.ergebnis);
+      })
+      .withFailureHandler((e) => {
+        fertig();
+        abgelehnt(new ApiFehler('Keine Verbindung zum Server' + (e && e.message ? ' (' + e.message + ')' : '') +
+          '. Bitte noch einmal versuchen.', 'netz'));
+      })
+      .aufruf(Z.token, name, args || {});
+  });
+}
+
+/** Das Google-Konto ist (nicht mehr) Mitglied. */
+function keinZugangSetzen(text) {
+  Z.daten = null;
+  Z.basis = null;
+  Z.keinZugang = text;
+  DIALOGE.forEach((d) => d.schliessen());
+  zeichnen();
+}
+
+/** Die Hallensitzung ist vorbei: zurück zum Ausweis – oder, ohne Hallengerät, zum Google-Konto. */
+function sitzungVerloren(text) {
+  tokenSetzen(null);
+  Z.daten = null;
+  Z.basis = null;
+  Z.halle = null;
+  DIALOGE.forEach((d) => d.schliessen());
+  if (text) meldung.info(text);
+  if (Ablage.lesen('hallengeraet')) zeichnen();
+  else laden();
+}
+
+// ─────────────────────────────── Meldungen ───────────────────────────────
+
+const meldung = {
+  zeigen(text, art, dauer) {
+    const ziel = document.getElementById('meldungen');
+    if (!ziel) return;
+    const el = h('div.meldung.' + art, { role: art === 'fehler' ? 'alert' : 'status' },
+      h('span', text),
+      h('button', { onclick: () => el.remove(), 'aria-label': 'Schließen' }, '✕'));
+    ziel.append(el);
+    while (ziel.children.length > 4) ziel.firstChild.remove();
+    setTimeout(() => el.remove(), dauer);
+  },
+  erfolg(text) {
+    this.zeigen(text, 'erfolg', 3500);
+  },
+  info(text) {
+    this.zeigen(text, 'info', 4000);
+  },
+  fehler(e) {
+    this.zeigen(e && e.message ? e.message : String(e), 'fehler', 8000);
+  },
+  /** Erfolg mit einem Folgeschritt – „Prüfung erfasst · Nachweis herunterladen“. */
+  tat(text, knopf, arbeit, art) {
+    const ziel = document.getElementById('meldungen');
+    if (!ziel) return;
+    const el = h('div.meldung.' + (art || 'erfolg'), { role: art === 'fehler' ? 'alert' : 'status' },
+      h('span', text),
+      h('button', {
+        style: { opacity: 1, textDecoration: 'underline', fontWeight: 650 },
+        onclick: () => {
+          el.remove();
+          arbeit();
+        },
+      }, knopf),
+      h('button', { onclick: () => el.remove(), 'aria-label': 'Schließen' }, '✕'));
+    ziel.append(el);
+    setTimeout(() => el.remove(), art === 'fehler' ? 14000 : 9000);
+  },
+  /** Ein Fehler mit einem Ausweg – „Nicht gespeichert … · Nochmal öffnen“. */
+  fehlerMit(text, knopf, arbeit) {
+    this.tat(text, knopf, arbeit, 'fehler');
+  },
+};
+
+// ─────────────────────────────── Dialoge ───────────────────────────────
+
+const DIALOGE = new Set();
+
+/**
+ * Ein Dialog. `inhalt(ctrl)` und `fuss(ctrl)` bauen sein DOM; `ctrl.neu()` baut es neu.
+ * `lebendig: true` – er zeichnet sich auch neu, wenn ein neuer Datenstand kommt
+ * (Geräteakte, Satz): Was dort angezeigt wird, soll nicht hinter dem Stand herhinken.
+ */
+function dialog(opt) {
+  const ctrl = { lebendig: !!opt.lebendig, zu: false, opt: opt };
+  const titel = h('h2', opt.titel || '');
+  const hg = h('div.modal-hg');
+  const inhalt = h('div.modal-inhalt');
+  const fuss = h('div.modal-fuss');
+  const box = h('div.modal' + (opt.breite ? '.' + opt.breite : ''), { role: 'dialog', 'aria-modal': 'true' },
+    h('div.modal-kopf', titel, h('button.schliessen', { onclick: () => ctrl.schliessen(), 'aria-label': 'Schließen', title: 'Schließen' }, icon('x', 20))),
+    inhalt, fuss);
+  hg.append(box);
+  ctrl.titel = (t) => {
+    titel.textContent = t;
+  };
+  ctrl.fussNeu = () => {
+    if (ctrl.zu) return;
+    const f = opt.fuss ? flach(opt.fuss(ctrl)) : [];
+    fuss.replaceChildren(...f);
+    fuss.classList.toggle('versteckt', !f.length);
+  };
+  ctrl.neu = () => {
+    if (ctrl.zu) return;
+    const scroll = inhalt.scrollTop;
+    mitFokus(() => {
+      inhalt.replaceChildren(...flach(opt.inhalt(ctrl)));
+      ctrl.fussNeu();
+    });
+    inhalt.scrollTop = scroll;
+  };
+  // Jede Eingabe kann ändern, ob „Speichern“ geht – der Fuß rechnet das neu, ohne
+  // dem Feld den Cursor zu nehmen.
+  inhalt.addEventListener('input', () => ctrl.fussNeu());
+  inhalt.addEventListener('change', () => ctrl.fussNeu());
+  const taste = (e) => {
+    if (e.key === 'Escape' && Array.from(DIALOGE).pop() === ctrl) ctrl.schliessen();
+  };
+  ctrl.schliessen = (wert) => {
+    if (ctrl.zu) return;
+    ctrl.zu = true;
+    hg.remove();
+    document.removeEventListener('keydown', taste);
+    DIALOGE.delete(ctrl);
+    if (opt.beimSchliessen) opt.beimSchliessen(wert);
+  };
+  hg.addEventListener('mousedown', (e) => {
+    if (e.target === hg && !opt.fest) ctrl.schliessen();
+  });
+  document.addEventListener('keydown', taste);
+  document.body.append(hg);
+  DIALOGE.add(ctrl);
+  ctrl.neu();
+  const erstes = inhalt.querySelector('[autofocus]') || (opt.fokus !== false && window.matchMedia('(pointer: fine)').matches
+    ? inhalt.querySelector('input:not([type=checkbox]):not([type=radio]):not([type=file]), select, textarea')
+    : null);
+  if (erstes) setTimeout(() => erstes.focus(), 30);
+  return ctrl;
+}
+
+/** Ja oder nein – als Versprechen. */
+function bestaetigen(opt) {
+  return new Promise((antwort) => {
+    let ergebnis = false;
+    dialog({
+      titel: opt.titel,
+      fokus: false,
+      inhalt: () => flach([].concat(opt.text).map((t) => (t instanceof Node ? t : h('p', t)))),
+      fuss: (ctrl) => [
+        h('button.btn', { onclick: () => ctrl.schliessen() }, 'Abbrechen'),
+        h('button.btn.' + (opt.gefahr ? 'btn-gefahr' : 'btn-primary'), {
+          onclick: () => {
+            ergebnis = true;
+            ctrl.schliessen();
+          },
+        }, opt.ja || 'OK'),
+      ],
+      beimSchliessen: () => antwort(ergebnis),
+    });
+  });
+}
+
+/**
+ * Ein Formular im Dialog: Werte in `w`, ein Speichern-Knopf, der während der Arbeit
+ * gesperrt ist, und Fehler im Dialog selbst – nicht unten rechts, wo man nach einem
+ * Klick auf „Speichern“ nicht hinsieht.
+ *
+ * Gibt `speichern` eine Änderung aus `Sync.tun` zurück, geht der Dialog sofort zu: Die
+ * Änderung ist schon zu sehen, gespeichert wird im Hintergrund. Was schon im Browser als
+ * unzulässig auffällt (`Sync.tun` wirft), steht wie bisher im Dialog. Lehnt erst der
+ * Server ab, kommt eine Meldung mit „Nochmal öffnen“ – derselbe Dialog mit denselben
+ * Eingaben und der Begründung darin.
+ */
+function formular(opt) {
+  const w = Object.assign({}, opt.werte || {});
+  let fehler = opt.fehler || '';
+  let laeuft = false;
+  const ctrl = dialog({
+    titel: opt.titel,
+    breite: opt.breite,
+    lebendig: opt.lebendig,
+    inhalt: (c) => [fehler ? h('p.fehlertext', { role: 'alert' }, fehler) : null, opt.inhalt(w, c)],
+    fuss: (c) => {
+      const sperre = opt.sperre ? opt.sperre(w) : null;
+      return [
+        opt.links ? h('div.links', opt.links(w, c)) : null,
+        sperre ? h('span.klein.gedimmt', sperre) : null,
+        h('button.btn', { onclick: () => c.schliessen() }, opt.abbrechenText || 'Abbrechen'),
+        h('button.btn.' + (opt.gefahr ? 'btn-gefahr' : 'btn-primary'), {
+          disabled: laeuft || !!sperre,
+          onclick: async () => {
+            laeuft = true;
+            fehler = '';
+            c.neu();
+            try {
+              let r = opt.speichern(w, c);
+              if (r && typeof r.then === 'function') r = await r;
+              laeuft = false;
+              if (r && r.op && r.bestaetigt) {
+                r.op.nochmal = (grund) => formular(Object.assign({}, opt, { werte: Object.assign({}, w), fehler: grund }));
+                c.schliessen();
+              } else if (r !== false) c.schliessen(r);
+            } catch (e) {
+              laeuft = false;
+              fehler = e.message || String(e);
+              c.neu();
+            }
+          },
+        }, laeuft ? 'Speichert …' : opt.speichernText || 'Speichern'),
+      ];
+    },
+  });
+  ctrl.w = w;
+  return ctrl;
+}
+
+// Formularbausteine, an ein Werteobjekt gebunden. Jedes Feld braucht eine stabile `id`,
+// sonst verliert es beim Neuzeichnen den Cursor.
+
+function feld(titel, steuer, hinweis) {
+  return h('label.feld', h('span', titel), steuer, hinweis ? h('span.feld-hinweis', hinweis) : null);
+}
+
+function eingabe(w, k, attrs) {
+  return h('input', Object.assign({
+    id: 'f-' + k,
+    value: w[k] === null || w[k] === undefined ? '' : String(w[k]),
+    oninput: (e) => {
+      w[k] = e.target.value;
+    },
+  }, attrs || {}));
+}
+
+function textfeld(w, k, attrs) {
+  return h('textarea', Object.assign({
+    id: 'f-' + k,
+    value: w[k] || '',
+    oninput: (e) => {
+      w[k] = e.target.value;
+    },
+  }, attrs || {}));
+}
+
+function auswahl(w, k, optionen, attrs, beiAenderung) {
+  return h('select', Object.assign({
+    id: 'f-' + k,
+    onchange: (e) => {
+      w[k] = e.target.value;
+      if (beiAenderung) beiAenderung(e.target.value);
+    },
+  }, attrs || {}), optionen.map((o) => h('option', { value: o[0], selected: String(w[k] === null || w[k] === undefined ? '' : w[k]) === String(o[0]) }, o[1])));
+}
+
+function haken(w, k, text, beiAenderung) {
+  return h('label.haken',
+    h('input', {
+      type: 'checkbox',
+      id: 'f-' + k,
+      checked: !!w[k],
+      onchange: (e) => {
+        w[k] = e.target.checked;
+        if (beiAenderung) beiAenderung(e.target.checked);
+      },
+    }),
+    h('span', text));
+}
+
+// ─────────────────────────────── Adresse ───────────────────────────────
+
+/**
+ * Welche Seite offen ist, steht in der Adresse – auch welche Geräteakte. So lässt
+ * sie sich verschicken und übersteht ein Neuladen.
+ *
+ * In Apps Script läuft die Seite in einem eingebetteten Rahmen; die Adresszeile
+ * gehört dem äußeren Fenster. `google.script.history` schreibt dort hinein. In der
+ * lokalen Vorschau gibt es das nicht – dort tut es der gewöhnliche Hash.
+ */
+const Router = {
+  gas() {
+    return typeof google !== 'undefined' && google.script && google.script.history && google.script.url;
+  },
+  normal(hash) {
+    const p = String(hash || '').replace(/^#/, '');
+    return p.charAt(0) === '/' ? p : '/' + p;
+  },
+  start(weiter) {
+    if (this.gas()) {
+      google.script.history.setChangeHandler((e) => {
+        Z.pfad = this.normal(e.location.hash);
+        zeichnen();
+      });
+      google.script.url.getLocation((ort) => {
+        Z.pfad = this.normal(ort.hash);
+        weiter();
+      });
+    } else {
+      window.addEventListener('hashchange', () => {
+        Z.pfad = this.normal(location.hash);
+        zeichnen();
+      });
+      Z.pfad = this.normal(location.hash);
+      weiter();
+    }
+  },
+  gehe(pfad, ersetzen) {
+    pfad = this.normal(pfad);
+    if (pfad === Z.pfad) return;
+    const seiteVorher = Z.pfad.split('/')[1];
+    Z.pfad = pfad;
+    if (this.gas()) {
+      if (ersetzen) google.script.history.replace(null, {}, pfad);
+      else google.script.history.push(null, {}, pfad);
+    } else {
+      history[ersetzen ? 'replaceState' : 'pushState'](null, '', '#' + pfad);
+    }
+    zeichnen();
+    if (seiteVorher !== pfad.split('/')[1]) window.scrollTo(0, 0);
+  },
+  teile() {
+    return Z.pfad.split('/').filter(Boolean);
+  },
+};
+
+function gehe(pfad, ersetzen) {
+  Router.gehe(pfad, ersetzen);
+}
+
+// ─────────────────────────────── Dateien ───────────────────────────────
+
+/** Eine Datei an den Browser geben. Base64 für Binäres (PDF), sonst Text. */
+function herunterladen(name, mime, inhalt, base64) {
+  let blob;
+  if (base64) {
+    const roh = atob(inhalt);
+    const bytes = new Uint8Array(roh.length);
+    for (let i = 0; i < roh.length; i++) bytes[i] = roh.charCodeAt(i);
+    blob = new Blob([bytes], { type: mime });
+  } else {
+    blob = new Blob(['﻿' + inhalt], { type: mime + ';charset=utf-8' });
+  }
+  const url = URL.createObjectURL(blob);
+  const a = h('a', { href: url, download: name, style: { display: 'none' } });
+  document.body.append(a);
+  try {
+    a.click();
+  } catch (e) {
+    window.open(url, '_blank');
+  }
+  setTimeout(() => {
+    a.remove();
+    URL.revokeObjectURL(url);
+  }, 30000);
+}
+
+async function pdfHolen(aktion, args) {
+  const r = await api(aktion, args);
+  if (r.mime === 'application/pdf') {
+    herunterladen(r.name, r.mime, r.base64, true);
+    return;
+  }
+  // Lokale Vorschau: Dort gibt es keinen PDF-Wandler, nur das HTML dahinter.
+  const roh = atob(r.base64);
+  const bytes = new Uint8Array(roh.length);
+  for (let i = 0; i < roh.length; i++) bytes[i] = roh.charCodeAt(i);
+  const html = new TextDecoder('utf-8').decode(bytes);
+  const rahmen = h('iframe', { srcdoc: html, style: { width: '100%', height: '70vh', border: '1px solid var(--n-200)', borderRadius: '8px', background: '#fff' } });
+  dialog({
+    titel: r.name.replace(/\.pdf$/, '') + ' (Vorschau)',
+    breite: 'breit',
+    inhalt: () => [h('p.klein.gedimmt', 'In Apps Script wird daraus auf dem Server ein PDF. Hier die Vorlage dazu.'), rahmen],
+    fuss: (c) => [
+      h('button.btn', { onclick: () => rahmen.contentWindow && rahmen.contentWindow.print() }, 'Drucken'),
+      h('button.btn.btn-primary', { onclick: () => c.schliessen() }, 'Schließen'),
+    ],
+  });
+}
+
+/** Nur dieses eine Stück drucken – Etikettenbogen, Ausweiskarte. */
+function drucken(el) {
+  el.classList.add('druck-ziel');
+  document.body.classList.add('drucken');
+  const ende = () => {
+    el.classList.remove('druck-ziel');
+    document.body.classList.remove('drucken');
+    window.removeEventListener('afterprint', ende);
+  };
+  window.addEventListener('afterprint', ende);
+  setTimeout(() => {
+    window.print();
+    setTimeout(ende, 1000);
+  }, 50);
+}
+
+// ─────────────────────────────── Thema ───────────────────────────────
+
+function themaAnwenden() {
+  const wahl = Ablage.lesen('thema', 'system');
+  if (wahl === 'light' || wahl === 'dark') document.documentElement.setAttribute('data-theme', wahl);
+  else document.documentElement.removeAttribute('data-theme');
+}
+
+function themaWechseln() {
+  const folge = { system: 'light', light: 'dark', dark: 'system' };
+  Ablage.schreiben('thema', folge[Ablage.lesen('thema', 'system')] || 'system');
+  themaAnwenden();
+  zeichnen();
+}
+</script>

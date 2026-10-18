@@ -1,0 +1,778 @@
+<script>
+/**
+ * Bausteine: Symbole, Abzeichen, Tabelle, Scanner, Barcodes (Code 128) und QR-Codes.
+ *
+ * Die Symbole, Code 128 und QR stammen aus dem SaaS-Produkt (`icons.tsx`, `barcode.ts`,
+ * `qr.ts`) – dort selbst geschrieben, hier von TypeScript auf schlichtes JavaScript
+ * gebracht. Keine Bibliothek, kein CDN: Was hier steht, ist alles, was läuft.
+ */
+'use strict';
+
+// ─────────────────────────────── Symbole ───────────────────────────────
+
+const ICONS = {
+  aktionsliste: '<path d="M9 4h6a1 1 0 0 1 1 1v1H8V5a1 1 0 0 1 1-1Z"/><path d="M16 5h2a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h2"/><path d="m9 13 2 2 4-4"/>',
+  geraet: '<path d="M12 3.5 20 8v8l-8 4.5L4 16V8Z"/><path d="M4 8l8 4.5L20 8"/><path d="M12 12.5V20.5"/>',
+  satz: '<path d="M12 3 3 7.5 12 12l9-4.5Z"/><path d="m3 12 9 4.5L21 12"/><path d="m3 16.5 9 4.5 9-4.5"/>',
+  typ: '<path d="M5 5.5A1.5 1.5 0 0 1 6.5 4H19v13H6.5A1.5 1.5 0 0 0 5 18.5Z"/><path d="M5 18.5A1.5 1.5 0 0 0 6.5 20H19v-3"/><path d="M9 8h6"/>',
+  lager: '<path d="M3 9.5 12 4l9 5.5V20a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1Z"/><path d="M9 21v-6h6v6"/>',
+  etikett: '<path d="M4 10.5V5a1 1 0 0 1 1-1h5.5a1 1 0 0 1 .7.3l8.5 8.5a1 1 0 0 1 0 1.4l-5.5 5.5a1 1 0 0 1-1.4 0L4.3 11.2a1 1 0 0 1-.3-.7Z"/><circle cx="8.5" cy="8.5" r="1.4"/>',
+  protokoll: '<path d="M4.5 7.5A3.5 3.5 0 0 1 8 4h11v13H8a3.5 3.5 0 0 0-3.5 3.5Z"/><path d="M9 8.5h6M9 12h4"/>',
+  mitglieder: '<path d="M16 20v-1.5a3.5 3.5 0 0 0-3.5-3.5h-5A3.5 3.5 0 0 0 4 18.5V20"/><circle cx="10" cy="8" r="3.2"/><path d="M20 20v-1.5a3.5 3.5 0 0 0-2.6-3.4"/><path d="M15.5 5.2a3.2 3.2 0 0 1 0 5.6"/>',
+  scan: '<path d="M4 8V5.5A1.5 1.5 0 0 1 5.5 4H8M16 4h2.5A1.5 1.5 0 0 1 20 5.5V8M20 16v2.5a1.5 1.5 0 0 1-1.5 1.5H16M8 20H5.5A1.5 1.5 0 0 1 4 18.5V16"/><path d="M4 12h16"/>',
+  umlagern: '<path d="M4 8h12l-3-3M20 16H8l3 3"/>',
+  menue: '<path d="M4 7h16M4 12h16M4 17h16"/>',
+  x: '<path d="M6 6l12 12M18 6L6 18"/>',
+  halle: '<rect x="5" y="3" width="14" height="18" rx="2.5"/><path d="M10.5 18h3"/>',
+  desktop: '<rect x="3" y="4" width="18" height="12.5" rx="1.5"/><path d="M8.5 20.5h7M12 16.5v4"/>',
+  abmelden: '<path d="M14 5.5V4a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1v-1.5"/><path d="M9.5 12H21m0 0-3.5-3.5M21 12l-3.5 3.5"/>',
+  warnung: '<path d="M12 4.5 21 19H3Z"/><path d="M12 10v4M12 16.5v.5"/>',
+  uhr: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>',
+  werkstatt: '<path d="M15.5 3.5a4.5 4.5 0 0 0-5.9 5.9l-5.2 5.2a2 2 0 1 0 2.8 2.8l5.2-5.2a4.5 4.5 0 0 0 5.9-5.9l-2.6 2.6-2.2-.4-.4-2.2Z"/>',
+  fahrzeug: '<path d="M3 16V9.5a1 1 0 0 1 1-1h9V16"/><path d="M13 11h4l3 3v2"/><circle cx="7" cy="17.5" r="1.8"/><circle cx="17" cy="17.5" r="1.8"/><path d="M8.8 17.5h6.4M3 17.5h2.2M18.8 17.5H21"/>',
+  ort: '<path d="M12 21s7-6 7-11a7 7 0 1 0-14 0c0 5 7 11 7 11Z"/><circle cx="12" cy="10" r="2.5"/>',
+  drucken: '<path d="M7 9V4h10v5"/><path d="M7 18H5.5A1.5 1.5 0 0 1 4 16.5v-5A1.5 1.5 0 0 1 5.5 10h13a1.5 1.5 0 0 1 1.5 1.5v5a1.5 1.5 0 0 1-1.5 1.5H17"/><rect x="7" y="14.5" width="10" height="5.5" rx="1"/>',
+  plus: '<path d="M12 5v14M5 12h14"/>',
+  pruefung: '<path d="M5 7.5 12 4l7 3.5v5c0 4.2-2.9 7.4-7 8.5-4.1-1.1-7-4.3-7-8.5Z"/><path d="m9 12 2 2 4-4"/>',
+  importexport: '<path d="M14 3H7a2 2 0 0 0-2 2v5"/><path d="M14 3l5 5v11a2 2 0 0 1-2 2H9"/><path d="M14 3v5h5"/><path d="M3 14h7"/><path d="M7 11l-4 3 4 3"/>',
+  inventur: '<path d="M9 4H7a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2h-2"/><path d="M9 3h6v3H9z"/><path d="m9 13 2 2 4-4"/>',
+  einstellungen: '<path d="M4 7h10"/><path d="M18 7h2"/><circle cx="16" cy="7" r="2.2"/><path d="M4 17h4"/><path d="M12 17h8"/><circle cx="10" cy="17" r="2.2"/>',
+  regeln: '<path d="M5 4v6a3 3 0 0 0 3 3h9"/><path d="M5 13v3a3 3 0 0 0 3 3h9"/><path d="m15 10 3 3-3 3"/><circle cx="5" cy="4" r="1.6"/>',
+  sonne: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>',
+  mond: '<path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>',
+  automatisch: '<circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor" stroke="none"/>',
+  kamera: '<path d="M4 8.5A1.5 1.5 0 0 1 5.5 7h2.2l1.5-2h5.6l1.5 2h2.2A1.5 1.5 0 0 1 20 8.5v9a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 17.5Z"/><circle cx="12" cy="13" r="3.5"/>',
+  stift: '<path d="M4 20h4L19 9l-4-4L4 16Z"/><path d="m13.5 6.5 4 4"/>',
+  muell: '<path d="M4 7h16M10 11v6M14 11v6M5.5 7l1 12a2 2 0 0 0 2 2h7a2 2 0 0 0 2-2l1-12M9 7V4h6v3"/>',
+  hoch: '<path d="m6 15 6-6 6 6"/>',
+  runter: '<path d="m6 9 6 6 6-6"/>',
+  rechts: '<path d="m9 6 6 6-6 6"/>',
+  download: '<path d="M12 4v11m0 0-4-4m4 4 4-4M5 19h14"/>',
+  schluessel: '<circle cx="8" cy="15" r="4"/><path d="m11 12 8-8m-3 3 3 3m-6 0 2 2"/>',
+  ausweis: '<rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="9" cy="11" r="2.2"/><path d="M5.5 16.5a3.5 3.5 0 0 1 7 0M15 10h3M15 13.5h3"/>',
+  haken: '<path d="m5 12.5 4.5 4.5L19 7.5"/>',
+  atemschutz: '<path d="M12 21s-7-4.2-7-10.2V5.6L12 3l7 2.6v5.2C19 16.8 12 21 12 21Z"/><path d="M12 8.5v6M9 11.5h6"/>',
+  einsatz: '<path d="M6.5 17v-4.5a5.5 5.5 0 0 1 11 0V17"/><path d="M4.5 17h15v3h-15z"/><path d="M12 3v2.5M4.6 6.1l1.6 1.6M19.4 6.1l-1.6 1.6"/><path d="M12 10.5v3"/>',
+  qualifikation: '<circle cx="12" cy="9" r="5"/><path d="m9.2 13.2-1.7 7.3 4.5-2.4 4.5 2.4-1.7-7.3"/>',
+};
+
+const FLAMME = '<path d="M12 2.8c3.4 3.6 6.2 6.4 6.2 10.4A6.2 6.2 0 0 1 5.8 13.2C5.8 10.4 7.4 8.6 9 6.9c.5 1.3 1.2 2 2.1 2.4-.3-2.2-.1-4.2.9-6.5Z"/><path d="M12 20.4a3.1 3.1 0 0 1-3.1-3.1c0-1.6 1.2-2.6 2-3.8.6 1.6 1.9 2.2 2.9 3.4a3 3 0 0 1-1.8 3.5Z"/>';
+
+function svgAus(innen, groesse, strich) {
+  const s = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  s.setAttribute('viewBox', '0 0 24 24');
+  s.setAttribute('width', groesse);
+  s.setAttribute('height', groesse);
+  s.setAttribute('fill', 'none');
+  s.setAttribute('stroke', 'currentColor');
+  s.setAttribute('stroke-width', strich || '1.75');
+  s.setAttribute('stroke-linecap', 'round');
+  s.setAttribute('stroke-linejoin', 'round');
+  s.setAttribute('aria-hidden', 'true');
+  s.setAttribute('class', 'icon');
+  s.innerHTML = innen; // nur die festen Pfade oben, nie Eingaben
+  return s;
+}
+
+function icon(name, groesse) {
+  return svgAus(ICONS[name] || ICONS.geraet, groesse || 18);
+}
+
+function ortIcon(typ, groesse) {
+  return icon({ lager: 'lager', fahrzeug: 'fahrzeug', werkstatt: 'werkstatt' }[typ] || 'ort', groesse || 16);
+}
+
+/** Das Wehrlogo, wenn eines hinterlegt ist – sonst die Flamme. */
+function wehrLogo(klasse, groesse) {
+  const logo = Z.start.logo;
+  if (logo) return h('span.' + klasse + '.bild', h('img', { src: logo, alt: '' }));
+  return h('span.' + klasse, svgAus(FLAMME, groesse || 22, '1.9'));
+}
+
+// ─────────────────────────────── Abzeichen ───────────────────────────────
+
+function statusBadge(status) {
+  return h('span.badge.' + (STATUS_FARBE[status] || 'badge-grau'), STATUS_TEXT[status] || status);
+}
+
+function faelligBadge(tage) {
+  if (tage === null || tage === undefined) return h('span.badge.badge-grau', 'kein Termin');
+  if (tage < 0) return h('span.badge.badge-rot', faelligText(tage));
+  if (tage <= ((Z.daten && Z.daten.kennzahlen.vorwarnung) || 30)) return h('span.badge.badge-gelb', faelligText(tage));
+  return h('span.badge.badge-gruen', faelligText(tage));
+}
+
+const VOLLST_TEXT = { vollstaendig: 'Vollständig', unvollstaendig: 'Unvollständig', abweichend: 'Abweichend' };
+const VOLLST_FARBE = { vollstaendig: 'badge-gruen', unvollstaendig: 'badge-rot', abweichend: 'badge-gelb' };
+function vollstBadge(v) {
+  return h('span.badge.' + VOLLST_FARBE[v], VOLLST_TEXT[v] || v);
+}
+
+function ortZeile(id) {
+  const o = Z.idx.ort.get(id);
+  if (!o) return h('span.gedimmt', '–');
+  return h('span', { style: { display: 'inline-flex', gap: '6px', alignItems: 'center' } }, ortIcon(o.typ), o.name);
+}
+
+/** Die nächste Fälligkeit eines Geräts – über alle aktiven Pläne. */
+function naechsteFaelligkeit(geraetId) {
+  const stand = (Z.idx.standVon.get(geraetId) || []).filter((s) => s.aktiv);
+  if (!stand.length) return null;
+  return stand.reduce((a, b) => (a.naechste_faellig <= b.naechste_faellig ? a : b));
+}
+
+// ─────────────────────────────── Tabelle ───────────────────────────────
+
+/**
+ * Eine Tabelle, die am Telefon zu Karten wird.
+ *
+ *   spalten   – [{ id, titel, wert(z) (zum Sortieren), zelle(z), klasse }]
+ *   zeilen    – die Daten
+ *   zustand   – ui()-Objekt der Seite; dort liegen Sortierung und angezeigte Menge
+ *   aktion    – (z) => Knöpfe für die letzte Spalte
+ *   klick     – (z) => beim Anklicken der Zeile
+ *   auswahl   – { set: Set, neu() } – Ankreuzfelder für Mehrfachauswahl
+ *
+ * Die Beschriftung für den Kartenmodus (`data-label`) setzt sie selbst. Sie den
+ * aufrufenden Seiten zu überlassen hieße, dass die nächste Tabelle sie vergisst.
+ */
+function tabelle(opt) {
+  const z = opt.zustand || {};
+  const spalten = opt.spalten;
+  let zeilen = opt.zeilen.slice();
+  const sortSpalte = spalten.find((s) => s.id === z.sortiert) || (opt.sortVorgabe ? spalten.find((s) => s.id === opt.sortVorgabe) : null);
+  if (sortSpalte && sortSpalte.wert) {
+    const richtung = z.absteigend ? -1 : 1;
+    zeilen.sort((a, b) => richtung * vergleich(sortSpalte.wert(a), sortSpalte.wert(b)));
+  }
+  if (!zeilen.length) return h('div.leer', opt.leer || 'Keine Einträge.');
+  const menge = z.menge || opt.seite || 100;
+  const sichtbar = zeilen.slice(0, menge);
+  const neu = opt.neu || (() => zeichnen());
+
+  const auswahl = opt.auswahl;
+  const alleGewaehlt = auswahl && sichtbar.length && sichtbar.every((r) => auswahl.set.has(opt.schluessel(r)));
+
+  const kopf = h('thead', h('tr',
+    auswahl ? h('th.spalte-wahl', h('input', {
+      type: 'checkbox',
+      checked: !!alleGewaehlt,
+      'aria-label': 'Alle wählen',
+      onchange: (e) => {
+        sichtbar.forEach((r) => (e.target.checked ? auswahl.set.add(opt.schluessel(r)) : auswahl.set.delete(opt.schluessel(r))));
+        auswahl.neu();
+      },
+    })) : null,
+    spalten.map((s) => h('th' + (s.wert ? '.sortierbar' : '') + (s.klasse ? '.' + s.klasse : ''), {
+      onclick: s.wert ? () => {
+        if (z.sortiert === s.id) z.absteigend = !z.absteigend;
+        else {
+          z.sortiert = s.id;
+          z.absteigend = false;
+        }
+        neu();
+      } : null,
+    }, s.titel, (sortSpalte === s && z.sortiert) ? h('span.pfeil', z.absteigend ? '↓' : '↑') : null)),
+    opt.aktion ? h('th.aktion', '') : null));
+
+  const rumpf = h('tbody', sichtbar.map((r) => {
+    const schluessel = opt.schluessel(r);
+    const tr = h('tr' + (opt.klick ? '.klickbar' : '') + (auswahl && auswahl.set.has(schluessel) ? '.gewaehlt' : ''), {
+      onclick: opt.klick ? (e) => {
+        if (e.target.closest('button, input, a, select, label')) return;
+        opt.klick(r);
+      } : null,
+    },
+    auswahl ? h('td.spalte-wahl', h('input', {
+      type: 'checkbox',
+      checked: auswahl.set.has(schluessel),
+      'aria-label': 'Wählen',
+      onchange: (e) => {
+        if (e.target.checked) auswahl.set.add(schluessel);
+        else auswahl.set.delete(schluessel);
+        auswahl.neu();
+      },
+    })) : null,
+    // Der Inhalt jeder Zelle steckt in einem eigenen Element: Als Karte steht er dann
+    // als EIN Block neben seiner Beschriftung, statt sich über die Breite zu verteilen.
+    spalten.map((s, i) => h('td' + (s.klasse ? '.' + s.klasse : '') + (i === 0 ? '.kopfzelle' : ''), { 'data-label': s.titel },
+      h('div.zelle', s.zelle ? s.zelle(r) : String(s.wert(r) == null ? '' : s.wert(r))))),
+    opt.aktion ? h('td.aktion', opt.aktion(r)) : null);
+    return tr;
+  }));
+
+  return h('div',
+    h('div.tabelle-wrap', h('table.tabelle-karten', kopf, rumpf)),
+    zeilen.length > menge
+      ? h('div.mehr-zeilen', h('button.btn.btn-klein', {
+        onclick: () => {
+          z.menge = menge + 200;
+          neu();
+        },
+      }, 'Weitere ' + Math.min(200, zeilen.length - menge) + ' von ' + (zeilen.length - menge) + ' anzeigen'))
+      : null);
+}
+
+// ─────────────────────────────── Code 128 ───────────────────────────────
+
+/**
+ * Die 107 Muster des Standards. Je sechs Breiten, abwechselnd Balken und Lücke,
+ * beginnend mit einem Balken – Muster 106 (Stopp) hat sieben.
+ */
+const C128 = [
+  '212222', '222122', '222221', '121223', '121322', '131222', '122213', '122312', '132212', '221213',
+  '221312', '231212', '112232', '122132', '122231', '113222', '123122', '123221', '223211', '221132',
+  '221231', '213212', '223112', '312131', '311222', '321122', '321221', '312212', '322112', '322211',
+  '212123', '212321', '232121', '111323', '131123', '131321', '112313', '132113', '132311', '211313',
+  '231113', '231311', '112133', '112331', '132131', '113123', '113321', '133121', '313121', '211331',
+  '231131', '213113', '213311', '213131', '311123', '311321', '331121', '312113', '312311', '332111',
+  '314111', '221411', '431111', '111224', '111422', '121124', '121421', '141122', '141221', '112214',
+  '112412', '122114', '122411', '142112', '142211', '241211', '221114', '413111', '241112', '134111',
+  '111242', '121142', '121241', '114212', '124112', '124211', '411212', '421112', '421211', '212141',
+  '214121', '412121', '111143', '111341', '131141', '114113', '114311', '411113', '411311', '113141',
+  '114131', '311141', '411131', '211412', '211214', '211232', '2331112',
+];
+
+/** Nur Zeichensatz B: Die Codes hier sind Großbuchstaben, Ziffern und Bindestriche. */
+function code128(text) {
+  const werte = [];
+  for (const zeichen of String(text)) {
+    const c = zeichen.charCodeAt(0);
+    if (c < 32 || c > 126) return null;
+    werte.push(c - 32);
+  }
+  if (!werte.length) return null;
+  let summe = 104;
+  werte.forEach((w, i) => {
+    summe += w * (i + 1);
+  });
+  const folge = [104].concat(werte, [summe % 103, 106]);
+  const breiten = [];
+  folge.forEach((v) => C128[v].split('').forEach((b) => breiten.push(Number(b))));
+  return breiten;
+}
+
+/** Als SVG – gestochen scharf auf dem Bildschirm wie auf dem Papier. */
+function code128Svg(text) {
+  const breiten = code128(text);
+  const ns = 'http://www.w3.org/2000/svg';
+  const s = document.createElementNS(ns, 'svg');
+  if (!breiten) return s;
+  const ruhe = 10;
+  const gesamt = breiten.reduce((a, b) => a + b, 0) + ruhe * 2;
+  s.setAttribute('viewBox', '0 0 ' + gesamt + ' 40');
+  s.setAttribute('preserveAspectRatio', 'none');
+  s.setAttribute('shape-rendering', 'crispEdges');
+  let x = ruhe;
+  let d = '';
+  breiten.forEach((b, i) => {
+    if (i % 2 === 0) d += 'M' + x + ' 0h' + b + 'v40h-' + b + 'z';
+    x += b;
+  });
+  const p = document.createElementNS(ns, 'path');
+  p.setAttribute('d', d);
+  p.setAttribute('fill', '#000');
+  s.append(p);
+  return s;
+}
+
+// ─────────────────────────────── QR-Code ───────────────────────────────
+// Byte-Modus, Fehlerkorrektur M, Versionen 1 bis 12. Für Ausweise (34 Zeichen) reicht
+// Version 3. Portiert aus `web/src/qr.ts` des SaaS-Produkts, dort von zbar und am
+// Aufbau geprüft.
+
+const QR = (() => {
+  const DATENBYTES_M = [0, 16, 28, 44, 64, 86, 108, 124, 154, 182, 216, 254, 290];
+  const BLOECKE_M = [[], [10, 1, 16, 0, 0], [16, 1, 28, 0, 0], [26, 1, 44, 0, 0], [18, 2, 32, 0, 0], [24, 2, 43, 0, 0],
+    [16, 4, 27, 0, 0], [18, 4, 31, 0, 0], [22, 2, 38, 2, 39], [22, 3, 36, 2, 37], [26, 4, 43, 1, 44], [30, 1, 50, 4, 51],
+    [22, 6, 36, 2, 37]];
+  const AUSRICHTUNG = [[], [], [6, 18], [6, 22], [6, 26], [6, 30], [6, 34], [6, 22, 38], [6, 24, 42], [6, 26, 46],
+    [6, 28, 50], [6, 30, 54], [6, 32, 58]];
+  const EXP = new Uint8Array(512);
+  const LOG = new Uint8Array(256);
+  let x = 1;
+  for (let i = 0; i < 255; i++) {
+    EXP[i] = x;
+    LOG[x] = i;
+    x <<= 1;
+    if (x & 0x100) x ^= 0x11d;
+  }
+  for (let i = 255; i < 512; i++) EXP[i] = EXP[i - 255];
+  const mul = (a, b) => (a === 0 || b === 0 ? 0 : EXP[LOG[a] + LOG[b]]);
+
+  function generator(n) {
+    let g = [1];
+    for (let i = 0; i < n; i++) {
+      const naechst = new Array(g.length + 1).fill(0);
+      for (let j = 0; j < g.length; j++) {
+        naechst[j] ^= mul(g[j], 1);
+        naechst[j + 1] ^= mul(g[j], EXP[i]);
+      }
+      g = naechst;
+    }
+    return g;
+  }
+  function ecBytes(daten, anzahl) {
+    const g = generator(anzahl);
+    const rest = daten.concat(new Array(anzahl).fill(0));
+    for (let i = 0; i < daten.length; i++) {
+      const f = rest[i];
+      if (f === 0) continue;
+      for (let j = 0; j < g.length; j++) rest[i + j] ^= mul(g[j], f);
+    }
+    return rest.slice(daten.length);
+  }
+  function formatBits(maske) {
+    const wert = (0 << 3) | maske; // Stufe M ist 00
+    let rest = wert << 10;
+    for (let i = 4; i >= 0; i--) if (rest & (1 << (i + 10))) rest ^= 0b10100110111 << i;
+    return ((wert << 10) | rest) ^ 0b101010000010010;
+  }
+  function versionBits(version) {
+    let rest = version << 12;
+    for (let i = 5; i >= 0; i--) if (rest & (1 << (i + 12))) rest ^= 0b1111100100101 << i;
+    return (version << 12) | rest;
+  }
+  const idx = (m, x, y) => y * m.groesse + x;
+  function setze(m, x, y, an, fest) {
+    m.modul[idx(m, x, y)] = an ? 1 : 0;
+    if (fest !== false) m.belegt[idx(m, x, y)] = 1;
+  }
+  function festeMuster(m, version) {
+    const g = m.groesse;
+    [[0, 0], [g - 7, 0], [0, g - 7]].forEach(([sx, sy]) => {
+      for (let dy = -1; dy <= 7; dy++) {
+        for (let dx = -1; dx <= 7; dx++) {
+          const px = sx + dx;
+          const py = sy + dy;
+          if (px < 0 || py < 0 || px >= g || py >= g) continue;
+          const rand = dx === -1 || dy === -1 || dx === 7 || dy === 7;
+          const ring = dx === 0 || dx === 6 || dy === 0 || dy === 6;
+          const kern = dx >= 2 && dx <= 4 && dy >= 2 && dy <= 4;
+          setze(m, px, py, !rand && (ring || kern));
+        }
+      }
+    });
+    for (let i = 8; i < g - 8; i++) {
+      setze(m, i, 6, i % 2 === 0);
+      setze(m, 6, i, i % 2 === 0);
+    }
+    const mitten = AUSRICHTUNG[version];
+    mitten.forEach((cy) => mitten.forEach((cx) => {
+      const beiSucher = (cx <= 8 && cy <= 8) || (cx >= g - 9 && cy <= 8) || (cx <= 8 && cy >= g - 9);
+      if (beiSucher) return;
+      for (let dy = -2; dy <= 2; dy++) {
+        for (let dx = -2; dx <= 2; dx++) {
+          const aussen = Math.abs(dx) === 2 || Math.abs(dy) === 2;
+          setze(m, cx + dx, cy + dy, aussen || (dx === 0 && dy === 0));
+        }
+      }
+    }));
+    for (let i = 0; i < 9; i++) {
+      if (i !== 6) setze(m, i, 8, false);
+      if (i !== 6) setze(m, 8, i, false);
+    }
+    for (let i = 0; i < 8; i++) setze(m, g - 1 - i, 8, false);
+    for (let i = 0; i < 7; i++) setze(m, 8, g - 1 - i, false);
+    setze(m, 8, g - 8, true);
+    if (version >= 7) {
+      const bits = versionBits(version);
+      for (let i = 0; i < 18; i++) {
+        const an = ((bits >> i) & 1) === 1;
+        setze(m, Math.floor(i / 3), g - 11 + (i % 3), an);
+        setze(m, g - 11 + (i % 3), Math.floor(i / 3), an);
+      }
+    }
+  }
+  const MASKEN = [
+    (x, y) => (x + y) % 2 === 0,
+    (x, y) => y % 2 === 0,
+    (x) => x % 3 === 0,
+    (x, y) => (x + y) % 3 === 0,
+    (x, y) => (Math.floor(y / 2) + Math.floor(x / 3)) % 2 === 0,
+    (x, y) => ((x * y) % 2) + ((x * y) % 3) === 0,
+    (x, y) => (((x * y) % 2) + ((x * y) % 3)) % 2 === 0,
+    (x, y) => (((x + y) % 2) + ((x * y) % 3)) % 2 === 0,
+  ];
+  function strafe(m) {
+    const g = m.groesse;
+    const an = (x, y) => m.modul[idx(m, x, y)] === 1;
+    let punkte = 0;
+    for (let i = 0; i < g; i++) {
+      [true, false].forEach((waagerecht) => {
+        let lauf = 1;
+        for (let j = 1; j < g; j++) {
+          const a = waagerecht ? an(j, i) : an(i, j);
+          const b = waagerecht ? an(j - 1, i) : an(i, j - 1);
+          if (a === b) lauf++;
+          else {
+            if (lauf >= 5) punkte += 3 + (lauf - 5);
+            lauf = 1;
+          }
+        }
+        if (lauf >= 5) punkte += 3 + (lauf - 5);
+      });
+    }
+    for (let y = 0; y < g - 1; y++) {
+      for (let x = 0; x < g - 1; x++) {
+        const a = an(x, y);
+        if (a === an(x + 1, y) && a === an(x, y + 1) && a === an(x + 1, y + 1)) punkte += 3;
+      }
+    }
+    const MUSTER = [true, false, true, true, true, false, true, false, false, false, false];
+    const UMGEKEHRT = MUSTER.slice().reverse();
+    for (let y = 0; y < g; y++) {
+      for (let x = 0; x <= g - 11; x++) {
+        if (MUSTER.every((v, i) => an(x + i, y) === v) || UMGEKEHRT.every((v, i) => an(x + i, y) === v)) punkte += 40;
+        if (MUSTER.every((v, i) => an(y, x + i) === v) || UMGEKEHRT.every((v, i) => an(y, x + i) === v)) punkte += 40;
+      }
+    }
+    let dunkel = 0;
+    for (let i = 0; i < m.modul.length; i++) if (m.modul[i]) dunkel++;
+    punkte += Math.floor(Math.abs((dunkel * 100) / (g * g) - 50) / 5) * 10;
+    return punkte;
+  }
+  function matrix(text) {
+    const roh = Array.from(new TextEncoder().encode(text));
+    let version = 0;
+    for (let v = 1; v <= 12; v++) {
+      if (DATENBYTES_M[v] * 8 >= 4 + (v <= 9 ? 8 : 16) + roh.length * 8) {
+        version = v;
+        break;
+      }
+    }
+    if (!version) throw new Error('Text zu lang für einen QR-Code.');
+    const [ecJeBlock, g1, d1, g2, d2] = BLOECKE_M[version];
+    const bits = [];
+    const schreibe = (wert, anzahl) => {
+      for (let i = anzahl - 1; i >= 0; i--) bits.push((wert >> i) & 1);
+    };
+    schreibe(0b0100, 4);
+    schreibe(roh.length, version <= 9 ? 8 : 16);
+    roh.forEach((b) => schreibe(b, 8));
+    const kapazitaet = DATENBYTES_M[version] * 8;
+    schreibe(0, Math.min(4, kapazitaet - bits.length));
+    while (bits.length % 8 !== 0) bits.push(0);
+    const fueller = [0xec, 0x11];
+    for (let i = 0; bits.length < kapazitaet; i++) schreibe(fueller[i % 2], 8);
+    const datenBytes = [];
+    for (let i = 0; i < bits.length; i += 8) datenBytes.push(bits.slice(i, i + 8).reduce((a, b) => (a << 1) | b, 0));
+    const bloecke = [];
+    let zeiger = 0;
+    [[g1, d1], [g2, d2]].forEach(([anzahl, groesse]) => {
+      for (let i = 0; i < anzahl; i++) {
+        const daten = datenBytes.slice(zeiger, zeiger + groesse);
+        zeiger += groesse;
+        bloecke.push({ daten: daten, ec: ecBytes(daten, ecJeBlock) });
+      }
+    });
+    const strom = [];
+    const maxDaten = Math.max.apply(null, bloecke.map((b) => b.daten.length));
+    for (let i = 0; i < maxDaten; i++) bloecke.forEach((b) => i < b.daten.length && strom.push(b.daten[i]));
+    for (let i = 0; i < ecJeBlock; i++) bloecke.forEach((b) => strom.push(b.ec[i]));
+    const groesse = version * 4 + 17;
+    const bauen = (maske) => {
+      const m = { groesse: groesse, modul: new Uint8Array(groesse * groesse), belegt: new Uint8Array(groesse * groesse) };
+      festeMuster(m, version);
+      let bit = 0;
+      let aufwaerts = true;
+      for (let rechts = groesse - 1; rechts >= 1; rechts -= 2) {
+        if (rechts === 6) rechts = 5;
+        for (let i = 0; i < groesse; i++) {
+          const y = aufwaerts ? groesse - 1 - i : i;
+          [rechts, rechts - 1].forEach((px) => {
+            if (m.belegt[idx(m, px, y)]) return;
+            const wert = bit < strom.length * 8 ? (strom[bit >> 3] >> (7 - (bit % 8))) & 1 : 0;
+            bit++;
+            setze(m, px, y, (wert === 1) !== MASKEN[maske](px, y), false);
+          });
+        }
+        aufwaerts = !aufwaerts;
+      }
+      const f = formatBits(maske);
+      for (let i = 0; i < 15; i++) {
+        const an = ((f >> i) & 1) === 1;
+        if (i < 6) setze(m, 8, i, an);
+        else if (i < 8) setze(m, 8, i + 1, an);
+        else if (i === 8) setze(m, 7, 8, an);
+        else setze(m, 14 - i, 8, an);
+        if (i < 8) setze(m, groesse - 1 - i, 8, an);
+        else setze(m, 8, groesse - 15 + i, an);
+      }
+      return m;
+    };
+    let beste = null;
+    let bestePunkte = Infinity;
+    for (let maske = 0; maske < 8; maske++) {
+      const k = bauen(maske);
+      const p = strafe(k);
+      if (p < bestePunkte) {
+        bestePunkte = p;
+        beste = k;
+      }
+    }
+    const raster = [];
+    for (let y = 0; y < groesse; y++) {
+      const zeile = [];
+      for (let px = 0; px < groesse; px++) zeile.push(beste.modul[idx(beste, px, y)] === 1);
+      raster.push(zeile);
+    }
+    return raster;
+  }
+  function svg(text) {
+    const raster = matrix(text);
+    const n = raster.length;
+    const rand = 4;
+    const gesamt = n + rand * 2;
+    let pfad = '';
+    for (let y = 0; y < n; y++) for (let px = 0; px < n; px++) if (raster[y][px]) pfad += 'M' + (px + rand) + ' ' + (y + rand) + 'h1v1h-1z';
+    const ns = 'http://www.w3.org/2000/svg';
+    const s = document.createElementNS(ns, 'svg');
+    s.setAttribute('viewBox', '0 0 ' + gesamt + ' ' + gesamt);
+    s.setAttribute('shape-rendering', 'crispEdges');
+    const hg = document.createElementNS(ns, 'rect');
+    hg.setAttribute('width', gesamt);
+    hg.setAttribute('height', gesamt);
+    hg.setAttribute('fill', '#fff');
+    const p = document.createElementNS(ns, 'path');
+    p.setAttribute('d', pfad);
+    p.setAttribute('fill', '#000');
+    s.append(hg, p);
+    return s;
+  }
+  return { matrix: matrix, svg: svg };
+})();
+
+// ─────────────────────────────── Töne ───────────────────────────────
+
+let tonKontext = null;
+function ton(frequenz, dauer) {
+  try {
+    tonKontext = tonKontext || new (window.AudioContext || window.webkitAudioContext)();
+    const o = tonKontext.createOscillator();
+    const g = tonKontext.createGain();
+    o.frequency.value = frequenz;
+    o.type = 'sine';
+    g.gain.value = 0.12;
+    o.connect(g);
+    g.connect(tonKontext.destination);
+    o.start();
+    o.stop(tonKontext.currentTime + dauer / 1000);
+  } catch (e) {
+    // Kein Ton ist kein Fehler.
+  }
+}
+const piepOk = () => ton(1320, 90);
+const piepFehler = () => {
+  ton(220, 160);
+  setTimeout(() => ton(180, 200), 180);
+};
+
+// ─────────────────────────────── Scanner ───────────────────────────────
+
+/**
+ * Scannen: drei Wege, keine Bibliothek.
+ *
+ *   1. Handscanner – tippt wie eine Tastatur ins Feld, Enter schickt ab.
+ *   2. Kamera live – `BarcodeDetector`, den Chrome auf Android mitbringt.
+ *   3. Foto – wenn der eingebettete Rahmen von Apps Script die Kamera nicht freigibt,
+ *      öffnet `capture` die Kamera-App des Telefons; erkannt wird auf dem Foto.
+ *
+ * Safari kann `BarcodeDetector` nicht. Dort bleibt das Feld (und der Handscanner),
+ * und die Oberfläche sagt warum, statt einen Knopf anzubieten, der nichts tut.
+ */
+const FORMATE = ['code_128', 'qr_code', 'code_39', 'ean_13', 'data_matrix'];
+let formatePruefung = null;
+function scanFormate() {
+  if (!formatePruefung) {
+    formatePruefung = (async () => {
+      if (!window.BarcodeDetector) return null;
+      try {
+        const koennen = await window.BarcodeDetector.getSupportedFormats();
+        const treffer = FORMATE.filter((f) => koennen.indexOf(f) >= 0);
+        return treffer.length ? treffer : null;
+      } catch (e) {
+        return null;
+      }
+    })();
+  }
+  return formatePruefung;
+}
+
+let aktiveKamera = null;
+function kameraStoppen() {
+  if (aktiveKamera) aktiveKamera();
+  aktiveKamera = null;
+}
+
+function scanner(opt) {
+  const wurzel = h('div.scanner');
+  let zuletzt = { code: '', zeit: 0 };
+  const melden = (code) => {
+    code = String(code || '').trim();
+    if (!code) return;
+    const jetzt = Date.now();
+    if (zuletzt.code === code && jetzt - zuletzt.zeit < 2500) return;
+    zuletzt = { code: code, zeit: jetzt };
+    if (navigator.vibrate) navigator.vibrate(40);
+    opt.beiCode(code);
+  };
+  const feld = h('input', {
+    id: opt.id || 'scan-feld',
+    placeholder: opt.platzhalter || 'Code scannen oder eintippen',
+    autocomplete: 'off',
+    autocapitalize: 'characters',
+    spellcheck: 'false',
+    enterkeyhint: 'go',
+    onkeydown: (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        const wert = feld.value;
+        feld.value = '';
+        melden(wert);
+      }
+    },
+  });
+  const kameraKnopf = h('button.btn', { type: 'button', title: 'Kamera', 'aria-label': 'Mit der Kamera scannen' }, icon('kamera', 22));
+  const fotoEingabe = h('input', { type: 'file', accept: 'image/*', capture: 'environment', style: { display: 'none' } });
+  const bereich = h('div');
+  const hinweis = h('div.scanner-hinweis');
+  wurzel.append(h('div.scanner-zeile', feld, kameraKnopf), fotoEingabe, bereich, hinweis);
+
+  scanFormate().then((formate) => {
+    if (!formate) {
+      kameraKnopf.classList.add('versteckt');
+      if (opt.hinweisOhneKamera !== false) {
+        hinweis.textContent = 'Dieser Browser kann keine Codes aus der Kamera lesen (z. B. Safari). Handscanner oder Eintippen funktioniert.';
+      }
+    }
+  });
+
+  const ausFoto = async (datei) => {
+    try {
+      const formate = await scanFormate();
+      const bild = await createImageBitmap(datei);
+      const treffer = await new window.BarcodeDetector({ formats: formate }).detect(bild);
+      if (treffer.length) {
+        piepOk();
+        melden(treffer[0].rawValue);
+      } else {
+        piepFehler();
+        meldung.fehler(new Error('Auf dem Foto war kein Code zu erkennen. Näher heran, gerade halten.'));
+      }
+    } catch (e) {
+      meldung.fehler(e);
+    }
+  };
+  fotoEingabe.addEventListener('change', () => {
+    if (fotoEingabe.files && fotoEingabe.files[0]) ausFoto(fotoEingabe.files[0]);
+    fotoEingabe.value = '';
+  });
+
+  kameraKnopf.addEventListener('click', async () => {
+    if (aktiveKamera) {
+      kameraStoppen();
+      return;
+    }
+    const formate = await scanFormate();
+    if (!formate) return;
+    let strom;
+    try {
+      strom = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 } } });
+    } catch (e) {
+      // Der Rahmen von Apps Script gibt die Kamera nicht immer frei. Dann das Foto.
+      hinweis.textContent = 'Live-Kamera nicht verfügbar – es öffnet sich die Kamera-App. Foto vom Code machen.';
+      fotoEingabe.click();
+      return;
+    }
+    const video = h('video', { playsinline: true, muted: true, autoplay: true });
+    video.srcObject = strom;
+    bereich.replaceChildren(h('div.scanner-video', video));
+    kameraKnopf.classList.add('btn-primary');
+    let laeuft = true;
+    const detektor = new window.BarcodeDetector({ formats: formate });
+    aktiveKamera = () => {
+      laeuft = false;
+      strom.getTracks().forEach((t) => t.stop());
+      bereich.replaceChildren();
+      kameraKnopf.classList.remove('btn-primary');
+    };
+    try {
+      await video.play();
+    } catch (e) {
+      // autoplay
+    }
+    const schauen = async () => {
+      if (!laeuft || !video.isConnected) {
+        if (laeuft) kameraStoppen();
+        return;
+      }
+      try {
+        const treffer = await detektor.detect(video);
+        if (treffer.length) {
+          piepOk();
+          melden(treffer[0].rawValue);
+        }
+      } catch (e) {
+        // ein einzelnes Bild ohne Erfolg
+      }
+      setTimeout(schauen, 220);
+    };
+    schauen();
+  });
+
+  if (opt.fokus && window.matchMedia('(pointer: fine)').matches) setTimeout(() => feld.focus(), 50);
+  return wurzel;
+}
+
+// ─────────────────────────────── Auswahl von Geräten ───────────────────────────────
+
+/** Ein Suchfeld, das Geräte vorschlägt – für Sätze und die Arbeitsliste. */
+function geraeteSuche(opt) {
+  const z = { text: '' };
+  const liste = h('div');
+  const zeigen = () => {
+    const t = norm(z.text);
+    if (!t) {
+      liste.replaceChildren();
+      return;
+    }
+    const treffer = Z.daten.geraete
+      .filter((g) => (!opt.filter || opt.filter(g)) &&
+        norm([g.bezeichnung, g.barcode, g.seriennummer, typName(g.geraetetyp_id)].join(' ')).indexOf(t) >= 0)
+      .slice(0, 8);
+    liste.replaceChildren(treffer.length
+      ? h('div.karte', { style: { marginTop: '6px' } }, treffer.map((g) => h('button.stamm-eintrag', {
+        type: 'button',
+        onclick: () => {
+          z.text = '';
+          eingabeFeld.value = '';
+          liste.replaceChildren();
+          opt.gewaehlt(g);
+        },
+      }, h('strong', geraetTitel(g)), h('span.klein.gedimmt', typName(g.geraetetyp_id) + ' · ' + g.barcode + ' · ' + ortName(g.lagerplatz_id)))))
+      : h('div.klein.gedimmt', { style: { padding: '6px 2px' } }, 'Kein passendes Gerät.'));
+  };
+  const eingabeFeld = h('input', {
+    id: opt.id || 'geraete-suche',
+    placeholder: opt.platzhalter || 'Gerät suchen: Bezeichnung, Barcode, Typ …',
+    oninput: (e) => {
+      z.text = e.target.value;
+      zeigen();
+    },
+    onkeydown: (e) => {
+      if (e.key === 'Enter') {
+        const t = aufloesen(e.target.value);
+        if (t && t.art === 'geraet') {
+          e.preventDefault();
+          e.target.value = '';
+          z.text = '';
+          liste.replaceChildren();
+          opt.gewaehlt(t.obj);
+        }
+      }
+    },
+  });
+  return h('div', eingabeFeld, liste);
+}
+</script>

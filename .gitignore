@@ -1,0 +1,6 @@
+# Erzeugt von `node test/vorschau.mjs` – nicht von Hand
+dist/
+# clasp: Projektkennung und Anmeldung gehören nicht ins Repository
+.clasp.json
+.clasprc.json
+node_modules/
