@@ -13,9 +13,10 @@
 
 ## Eine Sicherheitslücke melden
 
-**Bitte nicht als öffentliches Issue.** Über GitHub: *Security → Report a vulnerability*
-(eine private Meldung, die nur die Betreuer sehen). Hilfreich sind die Fassung (unten links
-in der Seitenleiste), was man getan hat, was passieren sollte und was passiert ist.
+**Bitte nicht als Issue, sondern direkt an den Betreuer des Repositorys** – auf GitHub über
+*Security → Report a vulnerability*, wo das eingeschaltet ist (eine private Meldung, die
+nur die Betreuer sehen), sonst über sein Profil. Hilfreich sind die Fassung (unten links in
+der Seitenleiste), was man getan hat, was passieren sollte und was passiert ist.
 
 Sicherheitskorrekturen gibt es nur für die **jeweils neueste Fassung** – solange 0.x eine
 Beta ist, gibt es keine gepflegten Altstände. Eine Wehr aktualisiert, indem sie die Dateien

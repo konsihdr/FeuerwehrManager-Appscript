@@ -3,6 +3,7 @@
   "version": "0.3.0",
   "private": true,
   "description": "Lager- und Prüfverwaltung für eine Feuerwehr – Google-Tabelle + Apps Script, ohne Bibliotheken",
+  "license": "MIT",
   "scripts": {
     "test": "node test/server.mjs && node test/oberflaeche.mjs",
     "test:server": "node test/server.mjs",

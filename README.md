@@ -37,6 +37,7 @@ Checklisten, Buchungen, Inventur, Regeln, Etiketten, Ausweise, Atemschutz-Nachwe
 | [SECURITY.md](SECURITY.md) | Bedrohungsmodell, Maßnahmen mit Nachweis, Lücken melden |
 | [CHANGELOG.md](CHANGELOG.md) | was sich je Fassung geändert hat |
 | [CLAUDE.md](CLAUDE.md) | warum es so gebaut ist – Entscheidungen, Befunde, offene Punkte |
+| [LICENSE](LICENSE) | MIT |
 
 ---
 
