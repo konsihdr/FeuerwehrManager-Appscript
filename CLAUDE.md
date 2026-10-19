@@ -137,6 +137,7 @@ für jede Aktion die Vorhersage des Browsers mit dem Ergebnis des Servers.
 | 2026-10-18 | Dienstnachweis mit oder ohne Qualifikationen | Einer geht an das Mitglied, einer an den Arbeitgeber, der eine Freistellung bescheinigt haben will – den geht die G26.3 nichts an |
 | 2026-10-18 | CSV-Export: was Excel als Formel läse (`=`, `+`, `-`, `@`, keine Zahl), bekommt ein Hochkomma; der Import nimmt es zurück | Excel führt Formeln auch aus einer CSV-Datei aus. Die Tabelle selbst schützt das Textformat (`@`); die Attrappe markiert seitdem jede Zelle, die Google als Formel läse |
 | 2026-10-18 | Fehlende **Spalten** ergänzt die App wie fehlende Blätter | 0.3 bringt `aus_einsatz` bei den Qualifikationsarten. Der Zwischenspeicher kennt das Blatt noch ohne; gelesen wird dann aus dem Blatt, die Spalte hinten angefügt. Bis 0.2 nannte die App die fehlende Spalte und verwies auf „Einrichten“ |
+| 2026-10-19 | **Beide Suiten auf GitHub** (`.github/workflows/pruefen.yml`) bei Push auf `main` und Pull Request | „Vor jedem Commit“ hängt an der Disziplin dessen, der committet. Weiter ohne Pakete; die drei GitHub-Aktionen sind auf den Commit festgelegt, nicht aufs Tag, und der Lauf darf nur lesen. Node 22, weil `package.json` das zusagt. Fehlt `zbarimg`, scheitert der Lauf – die Suite übersprünge die Codes sonst still. In UTC und mit C-Locale vorher lokal grün, also ohne Abhängigkeit von der Zeitzone des Rechners |
 
 ## 5. Befunde beim Bauen
 
@@ -232,7 +233,8 @@ das nur ein Lauf in Apps Script bestätigt:
 ## 8. Arbeitsweise
 
 - `node test/server.mjs` und `node test/oberflaeche.mjs` vor jedem Commit. Beide ohne
-  Pakete; die Oberfläche braucht Chromium und `zbarimg`.
+  Pakete; die Oberfläche braucht Chromium und `zbarimg`. GitHub lässt beide noch einmal
+  laufen; scheitert die Oberfläche dort, liegen die Bildschirmfotos als Artefakt am Lauf.
 - Eine neue Aktion bekommt `rollen`, und – wenn sie schreibt – `schreibend: true`. Ohne
   Rechteangabe lehnt `aufruf()` sie ab.
 - Eine neue schreibende Aktion, die die Oberfläche ohne Warten auslöst, bekommt einen

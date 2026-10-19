@@ -43,9 +43,9 @@ Spalte `aus_einsatz` bei den Qualifikationsarten – legt die Anwendung selbst a
 
 ## 0.1.0 – 2026-10-17
 
-- Nachbau der Lager- und Prüfverwaltung des SaaS-Produkts auf Google-Tabelle und Apps
-  Script, ohne Bibliotheken: Geräte, Gerätetypen, Prüfpläne mit Checklisten, Prüfungen,
-  Gerätesätze, Lagerplätze, Buchungen, Inventur, Regeln, Etiketten (Code 128), Import und
-  Export, Protokoll, PDFs auf dem Server.
+- Lager- und Prüfverwaltung auf Google-Tabelle und Apps Script, ohne Bibliotheken:
+  Geräte, Gerätetypen, Prüfpläne mit Checklisten, Prüfungen, Gerätesätze, Lagerplätze,
+  Buchungen, Inventur, Regeln, Etiketten (Code 128), Import und Export, Protokoll, PDFs
+  auf dem Server.
 - Anmeldung mit dem Firmenkonto (Google Workspace); in der Fahrzeughalle Ausweis (QR) oder
   Kürzel an gekoppelten Hallengeräten.

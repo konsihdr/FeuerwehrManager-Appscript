@@ -1,4 +1,4 @@
-# 🚒 FeuerwehrManager – Apps-Script-Fassung
+# 🚒 FeuerwehrManager
 
 Lager- und Prüfverwaltung für **eine** Feuerwehr, gebaut aus nichts als einer Google-Tabelle
 und dem Apps Script dahinter. Gerätetypen, Geräte, Gerätesätze, Lagerplätze, Prüfpläne mit
@@ -11,7 +11,6 @@ Checklisten, Buchungen, Inventur, Regeln, Etiketten, Ausweise, Atemschutz-Nachwe
 > aber noch nicht im Dauerbetrieb einer Wehr. Welche Annahmen erst echtes Apps Script
 > bestätigt, steht in `CLAUDE.md` (Abschnitt 6) und `SECURITY.md` (Abschnitt 5).
 >
-> Fachlich nachgebaut nach dem SaaS-Produkt (`../FeuerwehrManager-SaaS`, Stand 0.4.0).
 > **Keine Bibliothek, kein CDN, kein Build**: Was in `src/` steht, ist alles, was läuft –
 > Server wie Oberfläche. Geprüft mit 835 Zusicherungen gegen eine Attrappe der
 > Google-Dienste und 178 im echten Browser, die Barcodes von zbar gelesen.
@@ -41,37 +40,17 @@ Checklisten, Buchungen, Inventur, Regeln, Etiketten, Ausweise, Atemschutz-Nachwe
 
 ---
 
-## Drei Produkte, ein Ursprung
+## Für wen
 
-| | Wehr-Produkt | SaaS | **Apps Script (hier)** |
-|---|---|---|---|
-| Für wen | eine Wehr | viele Wehren auf einer Anlage | **eine Wehr** |
-| Betrieb | Raspberry Pi in der Wache | Supabase + Cloudflare | **Google-Tabelle + Apps Script** |
-| Daten liegen | bei der Wehr | beim Betreiber | **im Google Drive der Wehr** |
-| Kosten / Pflege | Hardware, Updates | zwei Dienste | **nichts außer dem Workspace-Tenant** |
-| Anmeldung | Kennwort oder Ausweis | E-Mail + Kennwort, Ausweis am Hallengerät | **Firmenkonto (Google), am Hallengerät Ausweis oder Kürzel** |
-| Rechte durchgesetzt in | der API | der Datenbank (RLS) | **der einen Tür `aufruf()`** |
+Für eine Wehr, die keinen Server betreiben und keinen Dienst bezahlen will, deren Leute
+aber ohnehin ein Konto im Google-Workspace der Firma haben – und die ihre Daten in einer
+Tabelle sehen möchte, die sie selbst öffnen kann. Eine Tabelle ist eine Wehr; eine zweite
+Wehr kopiert die Tabelle.
 
-Die Fassung ist für die Wehr gedacht, die keinen Server betreiben und keinen Dienst
-bezahlen will, deren Leute aber ohnehin ein Konto im Google-Workspace der Firma haben –
-und die ihre Daten in einer Tabelle sehen möchte, die sie selbst öffnen kann.
-
-### Was hier bewusst fehlt
-
-- **Mehrere Wehren auf einer Anlage, der Betreiberbereich.** Eine Tabelle ist eine Wehr.
-  Eine zweite Wehr kopiert die Tabelle. Damit entfällt die Mandantentrennung nicht als
-  Lücke, sondern als Frage: Es gibt nichts, wovon man getrennt werden müsste.
-- **Die zweistufige Datenschutz-Zustimmung.** Im SaaS-Produkt war sie das Tor zwischen
-  Betreiber und Wehr. Hier ist die Wehr selbst der Betreiber und damit der
-  Verantwortliche; die Daten liegen in ihrem eigenen Konto. Was sie ihren Mitgliedern
-  dazu sagen muss, sagt sie ihnen ohnehin.
-- **Kennwörter, Einladungsmails, „Kennwort vergessen“.** Wer im Firmen-Tenant ein Konto
-  hat, ist bei Google schon angemeldet. Aufnehmen heißt: die Adresse eintragen. Wer das
-  Firmenkonto verliert, verliert damit den Zugang am Schreibtisch – Ausweis und Kürzel in
-  der Halle erst, wenn er auch in der App gesperrt ist.
-- **Das Tagebuch an der Einsatzstelle.** Das führt die Wehr in ihrer eigenen kleinen
-  Anwendung, die offline auf dem Tablet läuft; hierher kommt der fertige Export. Ein Weg
-  zurück (Bericht aus der App ins Tagebuch) ist nicht nötig und nicht gebaut.
+**Nicht enthalten: das Tagebuch an der Einsatzstelle.** Das führt die Wehr in ihrer eigenen
+kleinen Anwendung, dem [Einsatztagebuch](https://github.com/konsihdr/Feuerwehreinsatztagebuch),
+die offline auf dem Tablet läuft; hierher kommt der fertige Export. Ein Weg zurück (Bericht
+aus der App ins Tagebuch) ist nicht nötig und nicht gebaut.
 
 ---
 
@@ -113,9 +92,9 @@ src/                      ← genau das, was nach Apps Script geht
 ├── 29_Einsaetze.js       Einsatzberichte, Kräfte, Abschrift des Tagebuchs, Archiv
 ├── 29_Personal.js        Qualifikationsarten und Nachweise (G26.3)
 ├── 30_Einrichtung.js     Menü in der Tabelle: einrichten, Administrator, Demo, Adresse
-├── 31_Demo.js            Demo-Daten (wie im SaaS-Produkt)
+├── 31_Demo.js            Demo-Daten zum Ausprobieren
 ├── index.html            Gerüst
-├── stil.html             Design-System (Tokens aus dem SaaS-Produkt, dunkles Thema)
+├── stil.html             Design-System (Farben, Abstände, dunkles Thema)
 └── js_*.html             Oberfläche: Grundlagen, Bausteine (Code 128, QR, Scanner),
                           Speichern im Hintergrund (js_sync), Dialoge, Schreibtisch,
                           Personal, Einsätze, Halle, Start
@@ -329,13 +308,13 @@ Tastatur) oder per Hand. Gibt der eingebettete Rahmen von Apps Script die Live-K
 nicht frei, öffnet sich die Kamera-App und der Code wird auf dem Foto erkannt.
 
 **Prüfnachweis und Arbeitsliste** entstehen als PDF auf dem Server (`Blob.getAs`) –
-nicht über `window.print()`, das im SaaS-Produkt an der Adresszeile quer über dem
-Nachweis gescheitert war. Die Arbeitsliste hat, wofür man sie ausdruckt: ein Kästchen je
+nicht über `window.print()`, bei dem der Browser Adresse und Datum mit auf den
+Nachweis druckt. Die Arbeitsliste hat, wofür man sie ausdruckt: ein Kästchen je
 Zeile und eine Linie zum Abzeichnen.
 
 ### Rollen
 
-Rollen sind keine Rangfolge, sondern Zuständigkeiten (wie im SaaS-Produkt):
+Rollen sind keine Rangfolge, sondern Zuständigkeiten:
 
 | Rolle | Technik | Personal |
 |---|---|---|
@@ -410,6 +389,8 @@ node test/vorschau.mjs      # dist/vorschau.html: die ganze Anwendung im Browser
 ```
 
 Gebraucht wird Node (ab 22) und für die Oberfläche Chromium und `zbarimg`. Keine Pakete.
+Auf GitHub laufen beide bei jedem Push auf `main` und jedem Pull Request
+(`.github/workflows/pruefen.yml`); scheitert die Oberfläche, hängen die Bildschirmfotos am Lauf.
 
 Die Attrappe (`test/attrappe.js`) ist streng, wo Google streng ist: Bereiche außerhalb
 des Blatts werfen, Zellen ohne Textformat machen aus „00123“ die Zahl 123, Bytes müssen

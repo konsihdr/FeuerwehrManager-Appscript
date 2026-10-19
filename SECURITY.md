@@ -1,6 +1,6 @@
 # Sicherheit
 
-> **Stand 2026-10-18 · Version 0.3.0 (Beta)** – für die Apps-Script-Fassung.
+> **Stand 2026-10-18 · Version 0.3.0 (Beta)**
 >
 > Jede Maßnahme nennt ihren **Nachweis**: eine Prüfung in `test/server.mjs` oder
 > `test/oberflaeche.mjs`, die fehlschlägt, wenn die Maßnahme wegfällt. Wo keiner steht, steht
@@ -24,7 +24,7 @@ aus `src/` neu hochlädt und eine neue Version bereitstellt (`docs/BETRIEB.md`).
 
 ---
 
-## 1. Wofür diese Fassung gebaut ist
+## 1. Wofür diese Anwendung gebaut ist
 
 Die Sicherheit dieser Anwendung hängt an vier Annahmen. Trifft eine nicht zu, gilt das
 Folgende nicht:
@@ -143,7 +143,7 @@ Was wo liegt und wie lange, steht in `docs/BETRIEB.md` unter *Datenschutz*.
 
 ---
 
-## 4. Was diese Fassung nicht kann – bewusst oder noch nicht
+## 4. Was die Anwendung nicht kann – bewusst oder noch nicht
 
 - **Die Tabelle schützt sich nicht selbst.** Die Blätter tragen einen Schutz, der vor
   versehentlichen Änderungen warnt; aufhalten kann er niemanden, der bearbeiten darf. Was
