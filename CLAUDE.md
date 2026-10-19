@@ -177,6 +177,14 @@ für jede Aktion die Vorhersage des Browsers mit dem Ergebnis des Servers.
 - **Der Reiter zählte 20, zeigte 7.** „Einsatztagebuch (20)“ schloss die Einträge
   „eingesetzt/abgerückt“ ein, die standardmäßig ausgeblendet sind. `tagebuch_eintraege`
   zählt jetzt nur, was im Tagebuch selbst stand.
+- **Erster Lauf auf GitHub: Code 13, kein Wort dazu** (2026-10-19). Die Oberfläche brach
+  im Teil „Telefon: Tabellen werden Karten“ ab – lokal mit Chromium 154 und mit demselben
+  Chrome 155 wie auf dem Runner grün, dort beim nächsten Lauf auch. Code 13 heißt: Node lief
+  leer, während eine Anfrage an Chromium offen war – das geht nur, wenn Chromium weg ist.
+  `browser.mjs` lehnt seitdem offene Anfragen ab, sobald Prozess oder Verbindung enden, mit
+  den letzten Zeilen von stderr. Gegenprobe: Chromium mitten in einer Anfrage beendet – alt
+  Code 13, neu eine Meldung. Danach viermal grün; die Ursache auf dem Runner ist offen, bis
+  die Meldung einmal erscheint.
 
 ## 6. Ungeprüft – erst in echtem Apps Script zu sehen
 
