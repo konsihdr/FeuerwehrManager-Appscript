@@ -23,9 +23,25 @@ export async function browserStarten(optionen = {}) {
     'about:blank',
   ], { stdio: ['ignore', 'ignore', 'pipe'] });
 
+  // Was Chromium zuletzt auf stderr sagte – stirbt er, steht der Grund meist dort.
+  let ausgabe = '';
+  prozess.stderr.on('data', (d) => {
+    ausgabe = (ausgabe + d).slice(-8000);
+  });
+  const tot = () => {
+    const wie = prozess.signalCode ? 'Signal ' + prozess.signalCode : prozess.exitCode !== null ? 'Code ' + prozess.exitCode : null;
+    const rest = ausgabe.trim().split('\n').slice(-15).join('\n');
+    return new Error((wie ? 'Chromium beendet (' + wie + ')' : 'Verbindung zu Chromium abgerissen') + (rest ? ':\n' + rest : ''));
+  };
+
   const adresse = await new Promise((erfuellt, abgelehnt) => {
     let puffer = '';
     const zeit = setTimeout(() => abgelehnt(new Error('Chromium meldet sich nicht.')), 20000);
+    prozess.once('error', abgelehnt);
+    prozess.once('exit', () => {
+      clearTimeout(zeit);
+      abgelehnt(tot());
+    });
     prozess.stderr.on('data', (d) => {
       puffer += d;
       const m = puffer.match(/DevTools listening on (ws:\/\/[^\s]+)/);
@@ -58,7 +74,16 @@ export async function browserStarten(optionen = {}) {
       fehler.push('console.error: ' + n.params.args.map((a) => a.value || a.description).join(' '));
     }
   });
+  // Stirbt Chromium mitten im Teil, bekäme keine offene Anfrage je eine Antwort: Node liefe
+  // leer und endete still mit „unsettled top-level await“. So scheitert der Teil mit Grund.
+  const allesAbbrechen = () => {
+    for (const { abgelehnt } of offen.values()) abgelehnt(tot());
+    offen.clear();
+  };
+  prozess.on('exit', allesAbbrechen);
+  ws.addEventListener('close', allesAbbrechen);
   const sende = (methode, params = {}) => new Promise((erfuellt, abgelehnt) => {
+    if (ws.readyState !== WebSocket.OPEN) return abgelehnt(tot());
     const id = naechste++;
     offen.set(id, { erfuellt, abgelehnt });
     ws.send(JSON.stringify({ id, method: methode, params }));
@@ -165,7 +190,7 @@ export async function browserStarten(optionen = {}) {
       } catch (e) {
         // schon zu
       }
-      if (prozess.exitCode === null) {
+      if (prozess.exitCode === null && prozess.signalCode === null) {
         await new Promise((r) => {
           const zeit = setTimeout(() => {
             prozess.kill('SIGKILL');
